@@ -665,7 +665,7 @@ sealed class ProxyRuntimePaths
 // 首次安装/启动解压到 <exe目录>\runtime\proxy-<版本>，之后只校验 .ready，不再解压。
 static class PayloadRuntime
 {
-    public const string Version = "20261123.6";
+    public const string Version = "20261123.8";
     const string ResNode = "payload.node.gz";
     const string ResServer = "payload.server.js.gz";
     const string ResRecord = "payload.we_record_window.ps1";

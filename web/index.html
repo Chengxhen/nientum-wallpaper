@@ -143,6 +143,20 @@
         <input type="text" id="dock-rename-input" maxlength="20" placeholder="输入封票名称..." />
         <button type="button" class="dock-pop-ok" id="btn-dock-rename-ok">保存</button>
       </div>
+      <div class="dock-url-form" id="dock-url-form">
+        <input type="text" id="dock-url-title" maxlength="20" placeholder="网站名称（如：Bilibili）" autocomplete="off" />
+        <div class="dock-url-input-row">
+          <input type="text" id="dock-url-input" maxlength="480" placeholder="输入或粘贴网址（https://...）" autocomplete="off" />
+          <button type="button" class="dock-pop-ok" id="btn-dock-url-paste" title="从剪贴板粘贴网址">📋</button>
+        </div>
+        <div class="dock-url-presets" id="dock-url-presets">
+          <button type="button" class="dock-url-chip" data-name="Bilibili" data-url="https://www.bilibili.com">B站</button>
+          <button type="button" class="dock-url-chip" data-name="GitHub" data-url="https://github.com">GitHub</button>
+          <button type="button" class="dock-url-chip" data-name="网易云音乐" data-url="https://music.163.com">网易云</button>
+          <button type="button" class="dock-url-chip" data-name="YouTube" data-url="https://www.youtube.com">YouTube</button>
+        </div>
+        <button type="button" class="dock-pick-img-btn open" id="btn-dock-url-ok">保存并用 Edge 打开</button>
+      </div>
       <button type="button" class="dock-pick-img-btn" id="btn-dock-pick-img">🖼 选择本地自定义图片...</button>
       <div class="dock-card-picker" id="dock-card-picker"></div>
     </div>
@@ -385,13 +399,31 @@
               <div class="sp-font-wave-wrap">
                 <label class="sp-toggle"><input type="checkbox" id="chk-font-wave" /><span>启用（桌面时钟与歌词）</span></label>
                 <div class="sp-color-tools">
-                  <input type="color" id="inp-font-wave-color" class="sp-color-inp" value="#6ec6ff" title="自定义左下角颜色" />
+                  <button type="button" id="btn-font-wave-palette" class="sp-palette-btn" title="打开自由调色板">
+                    <span class="sp-palette-preview" id="font-wave-preview"></span>
+                    <span>调色板</span>
+                  </button>
                   <div class="sp-color-swatches" id="opt-font-wave-swatches">
                     <button type="button" class="sp-swatch" data-color="#6ec6ff" style="--sw:#6ec6ff" title="星海蓝"></button>
                     <button type="button" class="sp-swatch" data-color="#ff9ec7" style="--sw:#ff9ec7" title="樱花粉"></button>
                     <button type="button" class="sp-swatch" data-color="#b896ff" style="--sw:#b896ff" title="暮星紫"></button>
                     <button type="button" class="sp-swatch" data-color="#6ef0d2" style="--sw:#6ef0d2" title="薄荷青"></button>
                     <button type="button" class="sp-swatch" data-color="#ff9a76" style="--sw:#ff9a76" title="珊瑚橘"></button>
+                  </div>
+                </div>
+                <div class="sp-palette-pop" id="font-palette-pop" aria-hidden="true">
+                  <div class="sp-palette-sv" id="font-palette-sv">
+                    <div class="sp-palette-sv-white"></div>
+                    <div class="sp-palette-sv-black"></div>
+                    <div class="sp-palette-cursor" id="font-palette-cursor"></div>
+                  </div>
+                  <div class="sp-palette-hue" id="font-palette-hue" title="拖动调节色相">
+                    <div class="sp-palette-hue-thumb" id="font-palette-hue-thumb"></div>
+                  </div>
+                  <div class="sp-palette-foot">
+                    <span class="sp-palette-chip" id="font-palette-chip"></span>
+                    <input type="text" id="inp-font-wave-hex" class="sp-palette-hex" maxlength="7" value="#6ec6ff" autocomplete="off" />
+                    <button type="button" class="warm-btn sm gold" id="btn-font-palette-done">确定</button>
                   </div>
                 </div>
               </div>
@@ -477,6 +509,21 @@
                 <span id="val-lyric-size">100%</span>
               </div>
             </div>
+          </div>
+        </div>
+        <div class="sp-update-bar" id="sp-update-bar">
+          <div class="sp-update-info">
+            <div class="sp-update-head">
+              <span class="sp-update-ver" id="sp-update-ver">当前版本 v2026.11.23.1</span>
+              <span class="sp-update-repo">GitHub: Chengxhen/nientum-wallpaper</span>
+              <span class="sp-update-status" id="sp-update-status"></span>
+            </div>
+            <div class="sp-update-notes" id="sp-update-notes"></div>
+          </div>
+          <div class="sp-update-actions">
+            <button type="button" class="warm-btn sm" id="btn-check-update">检查更新</button>
+            <button type="button" class="warm-btn sm" id="btn-open-release">🌐 打开发布页</button>
+            <button type="button" class="warm-btn gold sm" id="btn-download-update" style="display:none">⬇ 下载更新包</button>
           </div>
         </div>
         <div class="sp-footer">

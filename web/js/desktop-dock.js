@@ -435,12 +435,17 @@
     return slots.find(s => s.id === editingSlotId) || null;
   }
 
+  function isUrlSlot(slot) {
+    return !!(slot && (slot.kind === 'url' || /^https?:\/\//i.test(String(slot.path || '').trim())));
+  }
+
   function openWindowsFolder(slot) {
     if (!slot) return;
     const now = performance.now();
     if (now - lastOpenAt < 350) return;
     lastOpenAt = now;
-    apiPost('/api/fs/open', { path: slot.path, reveal: false })
+    const isUrl = isUrlSlot(slot);
+    apiPost('/api/fs/open', { path: slot.path, kind: isUrl ? 'url' : 'folder', reveal: false })
       .then((res) => {
         if (res && !res.ok && res.error) showToast(res.error);
       })
@@ -625,18 +630,30 @@
     layoutDockCards(false);
   }
 
+  function openUrlPopover(slot) {
+    editingSlotId = slot ? slot.id : '__new_url__';
+    popoverMode = 'url';
+    drawerSlotId = null;
+    if ($('dock-drawer')) $('dock-drawer').classList.remove('open');
+    syncDockOpenClass();
+    layoutDockCards(false);
+    renderPopover();
+  }
+
   function renderPopover() {
     const pop = $('dock-popover');
     const titleEl = $('dock-pop-title');
     const renameRow = $('dock-rename-row');
+    const urlForm = $('dock-url-form');
     const pickImgBtn = $('btn-dock-pick-img');
     const picker = $('dock-card-picker');
     const inp = $('dock-rename-input');
-    const slot = getEditingSlot();
+    const slot = editingSlotId === '__new_url__' ? { id: '__new_url__', title: '', path: '' } : getEditingSlot();
 
     if (!pop || !slot || !popoverMode) {
       if (pop) pop.classList.remove('open');
       if (pickImgBtn) pickImgBtn.classList.remove('open');
+      if (urlForm) urlForm.classList.remove('open');
       return;
     }
     pop.classList.add('open');
@@ -644,6 +661,7 @@
     if (popoverMode === 'rename') {
       if (titleEl) titleEl.textContent = '重命名封票';
       if (renameRow) renameRow.classList.add('open');
+      if (urlForm) urlForm.classList.remove('open');
       if (pickImgBtn) pickImgBtn.classList.remove('open');
       if (picker) picker.classList.remove('open');
       if (inp) {
@@ -651,9 +669,24 @@
         inp.focus();
         inp.select();
       }
+    } else if (popoverMode === 'url') {
+      const isNew = editingSlotId === '__new_url__';
+      if (titleEl) titleEl.textContent = isNew ? '添加 Edge 网站封票' : `编辑「${slot.title}」网址`;
+      if (renameRow) renameRow.classList.remove('open');
+      if (urlForm) urlForm.classList.add('open');
+      if (pickImgBtn) pickImgBtn.classList.remove('open');
+      if (picker) picker.classList.remove('open');
+      const uTitle = $('dock-url-title');
+      const uInp = $('dock-url-input');
+      if (uTitle) uTitle.value = isNew ? '' : (slot.title || '');
+      if (uInp) {
+        uInp.value = isNew ? '' : (slot.path || '');
+        uInp.focus();
+      }
     } else if (popoverMode === 'icon') {
       if (titleEl) titleEl.textContent = `更换「${slot.title}」封票样式`;
       if (renameRow) renameRow.classList.remove('open');
+      if (urlForm) urlForm.classList.remove('open');
       if (pickImgBtn) pickImgBtn.classList.add('open');
       if (picker) {
         picker.classList.add('open');
@@ -683,16 +716,19 @@
     slots.forEach((slot, idx) => {
       const isSelected = idx === selectedIndex;
       const custom = isCustomCard(slot.card);
+      const isUrl = isUrlSlot(slot);
       const cardEl = document.createElement('div');
       cardEl.className = 'dock-ticket' + (isSelected ? ' selected' : '') + (custom ? ' is-custom' : '');
       cardEl.dataset.id = slot.id;
       cardEl.dataset.idx = String(idx);
       cardEl.dataset.card = slot.card || 'cover_act0';
       cardEl.style.zIndex = String(500 - Math.abs(idx - selectedIndex));
-      cardEl.title = `单击居中选中 · 长按拖动调整顺序 · 双击打开文件夹：${slot.path}`;
+      cardEl.title = isUrl
+        ? `单击居中选中 · 长按拖动调序 · 双击用 Edge 打开：${slot.path}`
+        : `单击居中选中 · 长按拖动调整顺序 · 双击打开文件夹：${slot.path}`;
       cardEl.innerHTML = `
         <img class="dock-ticket-bg" src="${cardImgSrc(slot.card, isSelected)}" alt="" draggable="false" />
-        <div class="dock-ticket-cg-zone" title="悬停 0.5 秒展开文件夹内容预览 · 长按拖动调序 · 双击打开文件夹"></div>
+        <div class="dock-ticket-cg-zone" title="${isUrl ? '长按拖动调序 · 双击用 Edge 打开网站' : '悬停 0.5 秒展开文件夹内容预览 · 长按拖动调序 · 双击打开文件夹'}"></div>
         <div class="dock-ticket-peek-tag">${escapeHtml(slot.title)}</div>
         <div class="dock-ticket-info">
           <div>
@@ -700,9 +736,9 @@
             <div class="dock-ticket-path">${escapeHtml(slot.path)}</div>
           </div>
           <div class="dock-ticket-bottom">
-            <span class="dock-ticket-hint">长按拖动 · 双击打开</span>
+            <span class="dock-ticket-hint">${isUrl ? '长按拖动 · 双击 Edge 打开' : '长按拖动 · 双击打开'}</span>
             <div class="dock-ticket-actions">
-              <button type="button" class="dock-mini-btn rebind" title="选择定位文件夹">📁</button>
+              <button type="button" class="dock-mini-btn rebind" title="${isUrl ? '修改网站网址' : '选择定位文件夹'}">${isUrl ? '🌐' : '📁'}</button>
               <button type="button" class="dock-mini-btn icon" title="更换封票图案">🎨</button>
               <button type="button" class="dock-mini-btn rename" title="重命名">✎</button>
               <button type="button" class="dock-mini-btn del" title="移除此封票">✕</button>
@@ -712,7 +748,7 @@
       `;
 
       const cgZone = cardEl.querySelector('.dock-ticket-cg-zone');
-      if (cgZone) {
+      if (cgZone && !isUrl) {
         cgZone.addEventListener('mouseenter', () => {
           if (!dockEnabled || dragState.active || dragState.mouseDown) return;
           clearCgDwell();
@@ -745,7 +781,8 @@
         const curIdx = slots.indexOf(slot);
         if (curIdx >= 0) selectedIndex = curIdx;
         centerSelectedCard(true);
-        pickAndBindFolder(slot);
+        if (isUrl) openUrlPopover(slot);
+        else pickAndBindFolder(slot);
       };
       cardEl.querySelector('.icon').onclick = (e) => {
         e.stopPropagation();
@@ -806,21 +843,42 @@
     addEl.dataset.idx = String(addIdx);
     addEl.dataset.card = 'blank';
     addEl.style.zIndex = String(500 - Math.abs(addIdx - selectedIndex));
-    addEl.title = '单击添加新的本地文件夹封票';
+    addEl.title = '添加本地文件夹或 Edge 网站封票';
     addEl.innerHTML = `
       <img class="dock-ticket-bg" src="${cardImgSrc('blank', addSelected)}" alt="" draggable="false" />
       <div class="dock-ticket-peek-tag">＋添加</div>
-      <div class="dock-ticket-add-label">＋ 选择本地文件夹</div>
+      <div class="dock-ticket-add-label">＋ 添加封票</div>
       <div class="dock-ticket-info">
         <div>
           <div class="dock-ticket-title">添加新封票</div>
-          <div class="dock-ticket-path">点击选择任意本地文件夹</div>
+          <div class="dock-ticket-path">本地文件夹 或 Edge 打开网站</div>
         </div>
         <div class="dock-ticket-bottom">
-          <span class="dock-ticket-hint">单击添加</span>
+          <div class="dock-add-btns">
+            <button type="button" class="dock-add-btn" id="btn-dock-add-folder">📁 文件夹</button>
+            <button type="button" class="dock-add-btn" id="btn-dock-add-url">🌐 Edge 网站</button>
+          </div>
         </div>
       </div>
     `;
+    const btnAddFolder = addEl.querySelector('#btn-dock-add-folder');
+    const btnAddUrl = addEl.querySelector('#btn-dock-add-url');
+    if (btnAddFolder) {
+      btnAddFolder.onclick = (e) => {
+        e.stopPropagation();
+        selectedIndex = slots.length;
+        centerSelectedCard(true);
+        handleAddFolder();
+      };
+    }
+    if (btnAddUrl) {
+      btnAddUrl.onclick = (e) => {
+        e.stopPropagation();
+        selectedIndex = slots.length;
+        centerSelectedCard(true);
+        openUrlPopover(null);
+      };
+    }
     addEl.onclick = () => {
       if (performance.now() < suppressTicketClickUntil) return;
       const curAddIdx = slots.length;
@@ -1325,6 +1383,73 @@
       $('dock-rename-input').onkeydown = (e) => {
         if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
         if (e.key === 'Escape') closePopover();
+      };
+    }
+
+    const commitUrlSlot = async () => {
+      const uTitle = $('dock-url-title');
+      const uInp = $('dock-url-input');
+      let rawUrl = (uInp ? uInp.value : '').trim();
+      if (!rawUrl) {
+        showToast('请输入网址');
+        return;
+      }
+      if (!/^https?:\/\//i.test(rawUrl)) rawUrl = 'https://' + rawUrl;
+      let parsed;
+      try { parsed = new URL(rawUrl); } catch (_) {
+        showToast('网址格式不正确');
+        return;
+      }
+      const title = ((uTitle ? uTitle.value : '').trim() || parsed.hostname.replace(/^www\./i, '') || '网站').slice(0, 20);
+      if (editingSlotId === '__new_url__') {
+        const theme = CARD_THEMES[slots.length % CARD_THEMES.length];
+        slots.push({
+          id: 'slot_' + Date.now(),
+          title,
+          path: parsed.toString(),
+          kind: 'url',
+          card: theme.id
+        });
+        selectedIndex = slots.length - 1;
+      } else {
+        const slot = getEditingSlot();
+        if (slot) {
+          slot.title = title;
+          slot.path = parsed.toString();
+          slot.kind = 'url';
+        }
+      }
+      await saveSlots();
+      renderTickets();
+      centerSelectedCard(true);
+      closePopover();
+      showToast(`已保存网站：${title}`);
+    };
+    if ($('btn-dock-url-ok')) $('btn-dock-url-ok').onclick = commitUrlSlot;
+    if ($('dock-url-input')) {
+      $('dock-url-input').onkeydown = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commitUrlSlot(); }
+        if (e.key === 'Escape') closePopover();
+      };
+    }
+    if ($('btn-dock-url-paste')) {
+      $('btn-dock-url-paste').onclick = async () => {
+        try {
+          const resp = await fetch(`${API_BASE}/api/clipboard?t=${Date.now()}`, { cache: 'no-store' });
+          const j = await resp.json();
+          if (j && j.ok && j.text && $('dock-url-input')) {
+            $('dock-url-input').value = String(j.text).trim();
+            showToast('已从剪贴板粘贴');
+          }
+        } catch (_) {}
+      };
+    }
+    if ($('dock-url-presets')) {
+      $('dock-url-presets').onclick = (e) => {
+        const chip = e.target.closest('.dock-url-chip');
+        if (!chip) return;
+        if ($('dock-url-title') && chip.dataset.name) $('dock-url-title').value = chip.dataset.name;
+        if ($('dock-url-input') && chip.dataset.url) $('dock-url-input').value = chip.dataset.url;
       };
     }
 

@@ -970,20 +970,96 @@ body.mode-theater #theater-overlay {
 .wp-dur-custom input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .wp-dur-custom:focus-within { border-color: rgba(229, 198, 135, 0.75); }
 
-/* ===== 设置中心：字体水波配色控件与全局右上金→左下自定义水波荡漾 ===== */
+/* ===== 设置中心：字体水波配色控件与自由调色板 ===== */
 .sp-font-wave-wrap {
+  position: relative;
   display: flex; flex-direction: column; align-items: flex-end; gap: 7px;
 }
 .sp-color-tools {
   display: inline-flex; align-items: center; gap: 8px;
 }
-.sp-color-inp {
-  width: 30px; height: 22px; padding: 0; border-radius: 6px;
+.sp-palette-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; cursor: pointer;
   border: 1px solid rgba(229, 198, 135, 0.5);
-  background: transparent; cursor: pointer; outline: none;
+  background: rgba(24, 18, 13, 0.9); color: #f7e4bc; font-size: 12px;
 }
-.sp-color-inp::-webkit-color-swatch-wrapper { padding: 2px; }
-.sp-color-inp::-webkit-color-swatch { border: none; border-radius: 4px; }
+.sp-palette-btn:hover { border-color: #fff2cf; }
+.sp-palette-preview {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: var(--font-wave-color, #6ec6ff);
+}
+.sp-palette-pop {
+  display: none; position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+  width: 236px; padding: 10px; border-radius: 10px;
+  background: rgba(16, 12, 10, 0.97);
+  border: 1px solid rgba(229, 198, 135, 0.62);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.82);
+  flex-direction: column; gap: 9px;
+}
+.sp-palette-pop.open { display: flex; }
+.sp-palette-sv {
+  position: relative; width: 100%; height: 136px; border-radius: 7px; overflow: hidden;
+  background: #0099ff; cursor: crosshair; user-select: none;
+  border: 1px solid rgba(229, 198, 135, 0.35);
+}
+.sp-palette-sv-white {
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, #ffffff 0%, rgba(255,255,255,0) 100%);
+}
+.sp-palette-sv-black {
+  position: absolute; inset: 0;
+  background: linear-gradient(0deg, #000000 0%, rgba(0,0,0,0) 100%);
+}
+.sp-palette-cursor {
+  position: absolute; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid #ffffff; box-shadow: 0 0 4px rgba(0,0,0,0.9);
+  transform: translate(-50%, -50%); pointer-events: none;
+}
+.sp-palette-hue {
+  position: relative; width: 100%; height: 14px; border-radius: 999px;
+  background: linear-gradient(90deg, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%);
+  cursor: pointer; user-select: none;
+  border: 1px solid rgba(229, 198, 135, 0.4);
+}
+.sp-palette-hue-thumb {
+  position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff7e2; border: 2px solid #2b1d0f; box-shadow: 0 0 4px rgba(0,0,0,0.75);
+  transform: translate(-50%, -50%); pointer-events: none;
+}
+.sp-palette-foot { display: flex; align-items: center; gap: 6px; }
+.sp-palette-chip {
+  width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  background: var(--font-wave-color, #6ec6ff);
+}
+.sp-palette-hex {
+  flex: 1; min-width: 0; padding: 4px 7px; border-radius: 6px;
+  border: 1px solid rgba(229, 198, 135, 0.42); background: rgba(10, 8, 6, 0.85);
+  color: #fff0d0; font-size: 12.5px; font-family: monospace; outline: none;
+}
+
+/* 设置中心：GitHub 更新栏 */
+.sp-update-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin-top: 12px; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid rgba(229, 198, 135, 0.24);
+  background: rgba(255, 240, 210, 0.04);
+}
+.sp-update-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sp-update-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sp-update-ver { font-size: 13.5px; font-weight: 600; color: #f6e0ae; }
+.sp-update-repo { font-size: 12px; color: rgba(210, 188, 152, 0.72); }
+.sp-update-status { font-size: 12.5px; color: #9be2a8; }
+.sp-update-status.err { color: #ff9c8a; }
+.sp-update-status.has-new { color: #ffd97a; font-weight: 600; }
+.sp-update-notes {
+  display: none; font-size: 12px; line-height: 1.45; color: rgba(235, 220, 194, 0.85);
+  max-height: 54px; overflow-y: auto; white-space: pre-wrap;
+}
+.sp-update-notes.show { display: block; }
+.sp-update-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .sp-color-swatches { display: inline-flex; align-items: center; gap: 5px; }
 .sp-swatch {
   width: 16px; height: 16px; border-radius: 50%; padding: 0; cursor: pointer;
@@ -2021,6 +2097,30 @@ body.mode-theater #desktop-ticket-dock * { pointer-events: none !important; }
 }
 .dock-rename-row { display: none; align-items: center; gap: 6px; }
 .dock-rename-row.open { display: flex; }
+.dock-url-form { display: none; flex-direction: column; gap: 8px; }
+.dock-url-form.open { display: flex; }
+.dock-url-input-row { display: flex; align-items: center; gap: 6px; }
+#dock-url-title,
+#dock-url-input {
+  flex: 1; min-width: 0; padding: 6px 10px; border-radius: 7px;
+  border: 1px solid rgba(235, 198, 130, 0.55); background: rgba(10, 8, 6, 0.85);
+  color: #fff2d6; font-size: 13px; outline: none;
+}
+#dock-url-title:focus, #dock-url-input:focus { border-color: #f6e0ae; }
+.dock-url-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.dock-url-chip {
+  padding: 3px 9px; border-radius: 999px; cursor: pointer; font-size: 12px;
+  border: 1px solid rgba(229, 198, 135, 0.35); background: rgba(34, 26, 18, 0.85);
+  color: #efd8aa;
+}
+.dock-url-chip:hover { border-color: #f6e0ae; color: #fff4d8; }
+.dock-add-btns { display: inline-flex; align-items: center; gap: 8px; }
+.dock-add-btn {
+  padding: 4px 10px; border-radius: 999px; cursor: pointer; font-size: 12px;
+  border: 1px solid rgba(229, 198, 135, 0.55); background: rgba(46, 34, 20, 0.9);
+  color: #fae6be; transition: border-color 0.15s, background 0.15s;
+}
+.dock-add-btn:hover { border-color: #fff2cf; background: rgba(74, 54, 28, 0.95); }
 #dock-rename-input {
   flex: 1; min-width: 0; padding: 6px 10px; border-radius: 7px;
   border: 1px solid rgba(235, 198, 130, 0.65); background: rgba(10, 8, 6, 0.85);

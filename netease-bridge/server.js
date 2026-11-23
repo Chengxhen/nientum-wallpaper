@@ -11,6 +11,8 @@ const api = require('@neteasecloudmusicapienhanced/api');
 const PORT = Number(process.env.NIENTUM_PROXY_PORT) || 17988;
 const HOST = '127.0.0.1';
 const BRIDGE_VER = 4;
+const APP_VERSION = 'v2026.11.23.1';
+const GITHUB_REPO = 'Chengxhen/nientum-wallpaper';
 const BRIDGE_CTRL_PORT = 17989;
 // 代码目录（解压出来的 runtime\proxy-*）与用户数据目录分离：
 // exe 升级只替换代码，cookie / 导入壁纸 / 图标缓存等留在 Nientum_Bridge 根目录。
@@ -2418,12 +2420,17 @@ const server = http.createServer(async (req, res) => {
       if (!Array.isArray(body.slots)) {
         return sendJson(res, 400, { ok: false, error: 'slots must be array' });
       }
-      const clean = body.slots.slice(0, 16).map((s, idx) => ({
-        id: String((s && s.id) || `slot_${Date.now()}_${idx}`),
-        title: String((s && s.title) || '文件夹').slice(0, 20),
-        path: String((s && s.path) || '@desktop'),
-        card: String((s && s.card) || 'cover_act0').slice(0, 260)
-      }));
+      const clean = body.slots.slice(0, 16).map((s, idx) => {
+        const rawPath = String((s && s.path) || '@desktop').slice(0, 500);
+        const isUrl = (s && s.kind === 'url') || /^https?:\/\//i.test(rawPath);
+        return {
+          id: String((s && s.id) || `slot_${Date.now()}_${idx}`),
+          title: String((s && s.title) || (isUrl ? '网页' : '文件夹')).slice(0, 20),
+          path: rawPath,
+          kind: isUrl ? 'url' : 'folder',
+          card: String((s && s.card) || 'cover_act0').slice(0, 260)
+        };
+      });
       saveDockSlots(clean);
       return sendJson(res, 200, { ok: true, slots: clean });
     }
@@ -2484,6 +2491,27 @@ const server = http.createServer(async (req, res) => {
       if (rawTarget === '@recyclebin') {
         spawn('explorer.exe', ['shell:RecycleBinFolder'], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
         return sendJson(res, 200, { ok: true, path: rawTarget });
+      }
+      if (/^https?:\/\//i.test(rawTarget) || body.kind === 'url') {
+        const urlStr = /^https?:\/\//i.test(rawTarget) ? rawTarget : ('https://' + rawTarget);
+        try {
+          const parsed = new URL(urlStr);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('仅支持 http/https 网址');
+          const edgeCandidates = [
+            'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+            'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+            path.join(process.env.LOCALAPPDATA || '', 'Microsoft\\Edge\\Application\\msedge.exe')
+          ];
+          const edgeExe = edgeCandidates.find(p0 => p0 && fs.existsSync(p0));
+          if (edgeExe) {
+            spawn(edgeExe, [parsed.toString()], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+          } else {
+            spawn('cmd.exe', ['/c', 'start', '', 'msedge', parsed.toString()], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+          }
+          return sendJson(res, 200, { ok: true, path: parsed.toString(), kind: 'url' });
+        } catch (err) {
+          return sendJson(res, 200, { ok: false, error: (err && err.message) || '网址格式无效' });
+        }
       }
       const target = path.win32.normalize(resolveSpecialPath(rawTarget));
       if (!fs.existsSync(target)) {
@@ -2937,6 +2965,291 @@ const server = http.createServer(async (req, res) => {
       entry.title = title;
       saveImportedWallpapers();
       return sendJson(res, 200, { ok: true, item: publicImportedItem(entry) });
+    }
+
+let updateDownloadState = {
+  active: false,
+  percent: 0,
+  downloadedBytes: 0,
+  totalBytes: 0,
+  message: '',
+  filePath: '',
+  error: ''
+};
+
+function compareSemverLoose(a, b) {
+  const pa = String(a || '').replace(/^v/i, '').split(/[^0-9]+/).filter(Boolean).map(Number);
+  const pb = String(b || '').replace(/^v/i, '').split(/[^0-9]+/).filter(Boolean).map(Number);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const va = pa[i] || 0;
+    const vb = pb[i] || 0;
+    if (va !== vb) return va > vb ? 1 : -1;
+  }
+  return 0;
+}
+
+function githubFetchJson(urlStr, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 4) return reject(new Error('Too many redirects'));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const req = https.request(u, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Nientum-Wallpaper/' + APP_VERSION,
+        'Accept': 'application/vnd.github+json'
+      }
+    }, (r) => {
+      if ([301, 302, 303, 307, 308].includes(r.statusCode) && r.headers.location) {
+        r.resume();
+        return githubFetchJson(new URL(r.headers.location, u).toString(), redirects + 1).then(resolve, reject);
+      }
+      const chunks = [];
+      r.on('data', d => chunks.push(d));
+      r.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let data = null;
+        try { data = JSON.parse(raw); } catch (_) {}
+        resolve({ status: r.statusCode, data, raw });
+      });
+    });
+    req.setTimeout(12000, () => req.destroy(new Error('GitHub 连接超时')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function isAllowedGithubDownloadUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return h === 'github.com' || h.endsWith('.github.com') || h.endsWith('.githubusercontent.com');
+  } catch (_) {
+    return false;
+  }
+}
+
+function openUrlInEdge(urlStr) {
+  const edgeCandidates = [
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Microsoft\\Edge\\Application\\msedge.exe')
+  ];
+  const edgeExe = edgeCandidates.find(p0 => p0 && fs.existsSync(p0));
+  if (edgeExe) {
+    spawn(edgeExe, [urlStr], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+  } else {
+    spawn('cmd.exe', ['/c', 'start', '', 'msedge', urlStr], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  }
+}
+
+function downloadGithubAsset(downloadUrl, fileName, redirects = 0) {
+  if (redirects === 0) {
+    updateDownloadState = {
+      active: true,
+      percent: 2,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      message: '正在连接 GitHub 下载更新包...',
+      filePath: '',
+      error: ''
+    };
+  }
+  if (redirects > 6) {
+    updateDownloadState.active = false;
+    updateDownloadState.error = '重定向次数过多';
+    updateDownloadState.message = '下载失败：重定向次数过多';
+    return;
+  }
+  if (!isAllowedGithubDownloadUrl(downloadUrl)) {
+    updateDownloadState.active = false;
+    updateDownloadState.error = '不支持的下载域名';
+    updateDownloadState.message = '下载失败：不支持的下载域名';
+    return;
+  }
+  const u = new URL(downloadUrl);
+  const safeName = String(fileName || 'nientum-wallpaper-update.zip').replace(/[\\/:*?"<>|]/g, '_') || 'nientum-wallpaper-update.zip';
+  const dlDir = path.join(DATA_DIR, 'downloads');
+  try { fs.mkdirSync(dlDir, { recursive: true }); } catch (_) {}
+  const destPath = path.join(dlDir, safeName);
+  const partPath = destPath + '.part';
+
+  const req = https.request(u, {
+    method: 'GET',
+    headers: { 'User-Agent': 'Nientum-Wallpaper/' + APP_VERSION, 'Accept': '*/*' }
+  }, (r) => {
+    if ([301, 302, 303, 307, 308].includes(r.statusCode) && r.headers.location) {
+      r.resume();
+      const next = new URL(r.headers.location, u).toString();
+      downloadGithubAsset(next, safeName, redirects + 1);
+      return;
+    }
+    if (r.statusCode >= 400) {
+      r.resume();
+      updateDownloadState.active = false;
+      updateDownloadState.error = 'HTTP ' + r.statusCode;
+      updateDownloadState.message = '下载失败：HTTP ' + r.statusCode;
+      return;
+    }
+    const total = parseInt(r.headers['content-length'] || '0', 10) || 0;
+    updateDownloadState.totalBytes = total;
+    try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch (_) {}
+    const ws = fs.createWriteStream(partPath);
+    let written = 0;
+    r.on('data', (chunk) => {
+      written += chunk.length;
+      updateDownloadState.downloadedBytes = written;
+      if (total > 0) {
+        const pct = Math.max(3, Math.min(99, Math.round((written / total) * 100)));
+        updateDownloadState.percent = pct;
+        updateDownloadState.message = `正在下载 ${safeName} (${(written / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB)`;
+      } else {
+        updateDownloadState.message = `正在下载 ${safeName} (${(written / 1048576).toFixed(1)} MB)`;
+      }
+    });
+    r.pipe(ws);
+    ws.on('finish', () => {
+      ws.close(() => {
+        try {
+          if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+          fs.renameSync(partPath, destPath);
+          updateDownloadState.active = false;
+          updateDownloadState.percent = 100;
+          updateDownloadState.filePath = destPath;
+          updateDownloadState.message = '下载完成：' + destPath;
+          try { spawn('explorer.exe', [`/select,${destPath}`], { detached: true, stdio: 'ignore', windowsHide: false }).unref(); } catch (_) {}
+        } catch (err) {
+          updateDownloadState.active = false;
+          updateDownloadState.error = (err && err.message) || '保存失败';
+          updateDownloadState.message = '保存更新包失败';
+        }
+      });
+    });
+    const onErr = (err) => {
+      try { ws.destroy(); } catch (_) {}
+      try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch (_) {}
+      updateDownloadState.active = false;
+      updateDownloadState.error = (err && err.message) || '下载中断';
+      updateDownloadState.message = '下载失败：' + updateDownloadState.error;
+    };
+    r.on('error', onErr);
+    ws.on('error', onErr);
+  });
+  req.setTimeout(30000, () => req.destroy(new Error('下载连接超时')));
+  req.on('error', (err) => {
+    updateDownloadState.active = false;
+    updateDownloadState.error = (err && err.message) || '网络错误';
+    updateDownloadState.message = '下载失败：' + updateDownloadState.error;
+  });
+  req.end();
+}
+
+    if (p === '/api/update/check' && req.method === 'GET') {
+      try {
+        let rel = null;
+        const r1 = await githubFetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+        if (r1.status === 200 && r1.data && r1.data.tag_name) {
+          rel = r1.data;
+        } else {
+          const r2 = await githubFetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=1`);
+          if (r2.status === 200 && Array.isArray(r2.data) && r2.data.length > 0) {
+            rel = r2.data[0];
+          }
+        }
+        if (rel) {
+          const latestTag = String(rel.tag_name || rel.name || '');
+          const assets = Array.isArray(rel.assets) ? rel.assets.map(a => ({
+            name: String(a.name || ''),
+            size: Number(a.size || 0),
+            downloadUrl: String(a.browser_download_url || '')
+          })).filter(a => a.downloadUrl) : [];
+          if (!assets.length && rel.zipball_url) {
+            assets.push({ name: `nientum-wallpaper-${latestTag}.zip`, size: 0, downloadUrl: String(rel.zipball_url) });
+          }
+          const hasUpdate = latestTag ? (compareSemverLoose(latestTag, APP_VERSION) > 0) : false;
+          const isAhead = latestTag ? (compareSemverLoose(APP_VERSION, latestTag) > 0) : false;
+          return sendJson(res, 200, {
+            ok: true,
+            repo: GITHUB_REPO,
+            currentVersion: APP_VERSION,
+            latestTag,
+            name: String(rel.name || latestTag),
+            body: String(rel.body || '').slice(0, 1200),
+            publishedAt: String(rel.published_at || ''),
+            htmlUrl: String(rel.html_url || `https://github.com/${GITHUB_REPO}/releases`),
+            assets,
+            hasUpdate,
+            isAhead
+          });
+        }
+        const r3 = await githubFetchJson(`https://api.github.com/repos/${GITHUB_REPO}/tags?per_page=1`);
+        if (r3.status === 200 && Array.isArray(r3.data) && r3.data.length > 0 && r3.data[0].name) {
+          const latestTag = String(r3.data[0].name);
+          const hasUpdate = compareSemverLoose(latestTag, APP_VERSION) > 0;
+          return sendJson(res, 200, {
+            ok: true,
+            repo: GITHUB_REPO,
+            currentVersion: APP_VERSION,
+            latestTag,
+            name: latestTag,
+            body: 'GitHub 仓库暂无 Release 说明，已读取最新 Tag。',
+            publishedAt: '',
+            htmlUrl: `https://github.com/${GITHUB_REPO}/releases`,
+            assets: r3.data[0].zipball_url ? [{ name: `nientum-wallpaper-${latestTag}.zip`, size: 0, downloadUrl: String(r3.data[0].zipball_url) }] : [],
+            hasUpdate
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          repo: GITHUB_REPO,
+          currentVersion: APP_VERSION,
+          latestTag: '',
+          name: '',
+          body: '该仓库目前还没有发布任何 Release 或 Tag。',
+          publishedAt: '',
+          htmlUrl: `https://github.com/${GITHUB_REPO}/releases`,
+          assets: [],
+          hasUpdate: false
+        });
+      } catch (err) {
+        return sendJson(res, 200, {
+          ok: false,
+          repo: GITHUB_REPO,
+          currentVersion: APP_VERSION,
+          error: (err && err.message) || '检测更新失败，请检查网络或代理'
+        });
+      }
+    }
+
+    if (p === '/api/update/progress' && req.method === 'GET') {
+      return sendJson(res, 200, Object.assign({ ok: true }, updateDownloadState));
+    }
+
+    if (p === '/api/update/download' && req.method === 'POST') {
+      if (updateDownloadState.active) {
+        return sendJson(res, 200, { ok: false, error: '已有更新包正在下载中' });
+      }
+      const body = await readJsonBody(req);
+      const downloadUrl = String(body.downloadUrl || '').trim();
+      const fileName = String(body.fileName || 'nientum-wallpaper-update.zip').trim();
+      if (!downloadUrl || !isAllowedGithubDownloadUrl(downloadUrl)) {
+        return sendJson(res, 200, { ok: false, error: '无效的 GitHub 下载地址' });
+      }
+      downloadGithubAsset(downloadUrl, fileName);
+      return sendJson(res, 200, { ok: true, started: true });
+    }
+
+    if (p === '/api/update/open-page' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const targetUrl = String(body.url || `https://github.com/${GITHUB_REPO}/releases`).trim();
+      if (!targetUrl.startsWith(`https://github.com/${GITHUB_REPO}`)) {
+        openUrlInEdge(`https://github.com/${GITHUB_REPO}/releases`);
+      } else {
+        openUrlInEdge(targetUrl);
+      }
+      return sendJson(res, 200, { ok: true });
     }
 
     if (p === '/api/wp/meta' && req.method === 'POST') {

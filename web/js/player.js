@@ -697,7 +697,11 @@
     rootStyle.setProperty('--font-wave-glow', `rgba(${r}, ${g}, ${b}, 0.38)`);
     document.body.classList.toggle('font-wave-on', !!state.fontWaveEnabled);
     if ($('chk-font-wave')) $('chk-font-wave').checked = !!state.fontWaveEnabled;
-    if ($('inp-font-wave-color')) $('inp-font-wave-color').value = fwColor;
+    if ($('font-wave-preview')) $('font-wave-preview').style.background = fwColor;
+    if ($('font-palette-chip')) $('font-palette-chip').style.background = fwColor;
+    if ($('inp-font-wave-hex') && document.activeElement !== $('inp-font-wave-hex')) {
+      $('inp-font-wave-hex').value = fwColor;
+    }
     document.querySelectorAll('#opt-font-wave-swatches .sp-swatch').forEach(sw => {
       sw.classList.toggle('active', String(sw.dataset.color || '').toLowerCase() === fwColor);
     });
@@ -4021,8 +4025,8 @@
         if ($('chk-card-glass')) state.cardGlass = $('chk-card-glass').checked;
         if ($('chk-ui-glass')) state.uiGlass = $('chk-ui-glass').checked;
         if ($('chk-font-wave')) state.fontWaveEnabled = $('chk-font-wave').checked;
-        if ($('inp-font-wave-color') && /^#[0-9a-f]{6}$/i.test(String($('inp-font-wave-color').value || ''))) {
-          state.fontWaveColor = $('inp-font-wave-color').value;
+        if ($('inp-font-wave-hex') && /^#[0-9a-f]{6}$/i.test(String($('inp-font-wave-hex').value || ''))) {
+          state.fontWaveColor = $('inp-font-wave-hex').value;
         }
         if ($('chk-side-clock')) state.showSideClock = $('chk-side-clock').checked;
         if ($('chk-side-drawer')) state.showSideDrawer = $('chk-side-drawer').checked;
@@ -4048,6 +4052,126 @@
         $('settings-pop').setAttribute('aria-hidden', 'true');
       };
     }
+
+    (function setupGithubUpdater() {
+      const btnCheck = $('btn-check-update');
+      const btnOpen = $('btn-open-release');
+      const btnDl = $('btn-download-update');
+      const statusEl = $('sp-update-status');
+      const notesEl = $('sp-update-notes');
+      const verEl = $('sp-update-ver');
+      if (!btnCheck || !statusEl) return;
+
+      let latestReleaseUrl = 'https://github.com/Chengxhen/nientum-wallpaper/releases';
+      let latestAsset = null;
+      let dlPollTimer = 0;
+
+      const setUpdStatus = (msg, cls) => {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'sp-update-status' + (cls ? ' ' + cls : '');
+      };
+
+      const stopDlPoll = () => {
+        if (dlPollTimer) { clearInterval(dlPollTimer); dlPollTimer = 0; }
+      };
+
+      btnCheck.onclick = async () => {
+        btnCheck.disabled = true;
+        setUpdStatus('正在连接 GitHub 检测更新...', '');
+        if (notesEl) { notesEl.textContent = ''; notesEl.classList.remove('show'); }
+        if (btnDl) btnDl.style.display = 'none';
+        try {
+          const resp = await fetch(`${NCM_BASE}/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
+          const j = await resp.json();
+          if (!j || !j.ok) {
+            setUpdStatus((j && j.error) || '检测失败，请确认本地桥接服务已启动', 'err');
+            return;
+          }
+          if (verEl && j.currentVersion) verEl.textContent = '当前版本 ' + j.currentVersion;
+          if (j.htmlUrl) latestReleaseUrl = j.htmlUrl;
+          const assets = Array.isArray(j.assets) ? j.assets : [];
+          latestAsset = assets.find(a => /\.(zip|rar|7z|exe)$/i.test(String(a && a.name || ''))) || assets[0] || null;
+          if (!j.latestTag) {
+            setUpdStatus('仓库暂无已发布版本', '');
+          } else if (j.hasUpdate) {
+            setUpdStatus(`发现新版本 ${j.latestTag}！`, 'has-new');
+            if (notesEl && j.body) {
+              notesEl.textContent = j.body;
+              notesEl.classList.add('show');
+            }
+            if (btnDl && latestAsset && latestAsset.downloadUrl) {
+              btnDl.textContent = `⬇ 下载 ${latestAsset.name || j.latestTag}`;
+              btnDl.style.display = '';
+            }
+          } else if (j.isAhead) {
+            setUpdStatus(`当前版本领先于 GitHub (${j.latestTag})`, '');
+          } else {
+            setUpdStatus(`已是最新版本 (${j.latestTag})`, '');
+            if (notesEl && j.body) {
+              notesEl.textContent = j.body;
+              notesEl.classList.add('show');
+            }
+          }
+        } catch (_) {
+          setUpdStatus('无法连接本地桥接服务（127.0.0.1:17988）', 'err');
+        } finally {
+          btnCheck.disabled = false;
+        }
+      };
+
+      if (btnOpen) {
+        btnOpen.onclick = () => {
+          fetch(`${NCM_BASE}/api/update/open-page`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: latestReleaseUrl })
+          }).catch(() => {});
+        };
+      }
+
+      if (btnDl) {
+        btnDl.onclick = async () => {
+          if (!latestAsset || !latestAsset.downloadUrl) return;
+          btnDl.disabled = true;
+          setUpdStatus('正在启动下载...', '');
+          try {
+            const resp = await fetch(`${NCM_BASE}/api/update/download`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ downloadUrl: latestAsset.downloadUrl, fileName: latestAsset.name || '' })
+            });
+            const j = await resp.json();
+            if (!j || !j.ok) {
+              setUpdStatus((j && j.error) || '下载启动失败', 'err');
+              btnDl.disabled = false;
+              return;
+            }
+            stopDlPoll();
+            dlPollTimer = setInterval(async () => {
+              try {
+                const pr = await fetch(`${NCM_BASE}/api/update/progress?t=${Date.now()}`, { cache: 'no-store' });
+                const pj = await pr.json();
+                if (!pj) return;
+                if (pj.error) {
+                  stopDlPoll();
+                  setUpdStatus(pj.message || pj.error, 'err');
+                  btnDl.disabled = false;
+                  return;
+                }
+                if (pj.message) setUpdStatus(pj.message, pj.active ? '' : 'has-new');
+                if (!pj.active) {
+                  stopDlPoll();
+                  btnDl.disabled = false;
+                }
+              } catch (_) {}
+            }, 500);
+          } catch (_) {
+            setUpdStatus('下载请求失败', 'err');
+            btnDl.disabled = false;
+          }
+        };
+      }
+    })();
 
     if ($('btn-reset-settings')) {
       $('btn-reset-settings').onclick = () => {
@@ -4126,19 +4250,135 @@
       };
     }
 
-    if ($('inp-font-wave-color')) {
-      const onColorPick = (e) => {
-        const val = String(e.target.value || '').trim();
-        if (/^#[0-9a-f]{6}$/i.test(val)) {
-          state.fontWaveColor = val;
-          state.fontWaveEnabled = true;
-          applyVisualSettings();
-          saveState();
+    (function setupFreeColorPalette() {
+      const btn = $('btn-font-wave-palette');
+      const pop = $('font-palette-pop');
+      const svBox = $('font-palette-sv');
+      const svCursor = $('font-palette-cursor');
+      const hueBox = $('font-palette-hue');
+      const hueThumb = $('font-palette-hue-thumb');
+      const hexInp = $('inp-font-wave-hex');
+      const doneBtn = $('btn-font-palette-done');
+      if (!btn || !pop || !svBox || !hueBox) return;
+
+      let hsv = { h: 204, s: 0.57, v: 1 };
+      const hexToRgb = (hex) => {
+        const m = String(hex || '').match(/^#([0-9a-f]{6})$/i);
+        if (!m) return null;
+        const n = parseInt(m[1], 16);
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      };
+      const rgbToHsv = (r, g, b) => {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+        let h = 0;
+        if (d !== 0) {
+          if (max === r) h = ((g - b) / d) % 6;
+          else if (max === g) h = (b - r) / d + 2;
+          else h = (r - g) / d + 4;
+          h = Math.round(h * 60);
+          if (h < 0) h += 360;
+        }
+        return { h, s: max === 0 ? 0 : d / max, v: max };
+      };
+      const hsvToHex = (h, s, v) => {
+        const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+        let r = 0, g = 0, b = 0;
+        if (h < 60) { r = c; g = x; }
+        else if (h < 120) { r = x; g = c; }
+        else if (h < 180) { g = c; b = x; }
+        else if (h < 240) { g = x; b = c; }
+        else if (h < 300) { r = x; b = c; }
+        else { r = c; b = x; }
+        const toHex = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+        return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+      };
+
+      const renderPaletteUi = () => {
+        svBox.style.background = `hsl(${hsv.h}, 100%, 50%)`;
+        if (svCursor) {
+          svCursor.style.left = (hsv.s * 100).toFixed(1) + '%';
+          svCursor.style.top = ((1 - hsv.v) * 100).toFixed(1) + '%';
+        }
+        if (hueThumb) {
+          hueThumb.style.left = ((hsv.h / 360) * 100).toFixed(1) + '%';
         }
       };
-      $('inp-font-wave-color').addEventListener('input', onColorPick);
-      $('inp-font-wave-color').addEventListener('change', onColorPick);
-    }
+
+      const applyHsvColor = () => {
+        const hex = hsvToHex(hsv.h, hsv.s, hsv.v);
+        state.fontWaveColor = hex;
+        state.fontWaveEnabled = true;
+        applyVisualSettings();
+        renderPaletteUi();
+      };
+
+      const syncFromState = () => {
+        const rgb = hexToRgb(state.fontWaveColor);
+        if (rgb) hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+        renderPaletteUi();
+      };
+
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const open = !pop.classList.contains('open');
+        if (open) syncFromState();
+        pop.classList.toggle('open', open);
+        pop.setAttribute('aria-hidden', open ? 'false' : 'true');
+      };
+      if (doneBtn) {
+        doneBtn.onclick = (e) => {
+          e.stopPropagation();
+          pop.classList.remove('open');
+          pop.setAttribute('aria-hidden', 'true');
+          saveState();
+        };
+      }
+      pop.onclick = (e) => e.stopPropagation();
+
+      const bindDrag = (el, onMove) => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          onMove(e);
+          const mm = (ev) => onMove(ev);
+          const mu = () => {
+            window.removeEventListener('mousemove', mm);
+            window.removeEventListener('mouseup', mu);
+            saveState();
+          };
+          window.addEventListener('mousemove', mm);
+          window.addEventListener('mouseup', mu);
+        });
+      };
+
+      bindDrag(svBox, (e) => {
+        const rect = svBox.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        hsv.s = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        hsv.v = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / rect.height));
+        applyHsvColor();
+      });
+
+      bindDrag(hueBox, (e) => {
+        const rect = hueBox.getBoundingClientRect();
+        if (!rect.width) return;
+        hsv.h = Math.max(0, Math.min(359, Math.round(((e.clientX - rect.left) / rect.width) * 360)));
+        applyHsvColor();
+      });
+
+      if (hexInp) {
+        hexInp.addEventListener('input', () => {
+          const val = hexInp.value.trim();
+          if (/^#[0-9a-f]{6}$/i.test(val)) {
+            state.fontWaveColor = val;
+            state.fontWaveEnabled = true;
+            applyVisualSettings();
+            syncFromState();
+            saveState();
+          }
+        });
+      }
+    })();
 
     if ($('opt-font-wave-swatches')) {
       $('opt-font-wave-swatches').onclick = (e) => {

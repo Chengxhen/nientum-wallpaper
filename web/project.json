@@ -1,0 +1,83 @@
+{
+  "description": "《Nientum - Op.ZERO》交互式高清CG壁纸与剧场音乐播放器",
+  "file": "index.html",
+  "general": {
+    "supportsaudioprocessing": true,
+    "properties": {
+      "schemecolor": {
+        "order": 0,
+        "text": "ui_browse_properties_scheme_color",
+        "type": "color",
+        "value": "0.09 0.07 0.05"
+      },
+      "ui_mode": {
+        "order": 1,
+        "text": "默认界面模式",
+        "type": "combo",
+        "value": "capsule",
+        "options": [
+          { "label": "右上角半透明音乐栏（推荐）", "value": "capsule" },
+          { "label": "纯净壁纸（仅右上微光按钮）", "value": "pure" },
+          { "label": "展开剧场播放器", "value": "theater" }
+        ]
+      },
+      "ui_opacity": {
+        "order": 2,
+        "text": "界面透明度 (%)",
+        "type": "slider",
+        "min": 40,
+        "max": 100,
+        "value": 94
+      },
+      "auto_sync_cg": {
+        "order": 3,
+        "text": "切歌时自动切换对应章节壁纸",
+        "type": "bool",
+        "value": false
+      },
+      "particle_density": {
+        "order": 4,
+        "text": "桌面氛围粒子密度 (%)",
+        "type": "slider",
+        "min": 0,
+        "max": 150,
+        "value": 80
+      },
+      "audio_volume": {
+        "order": 5,
+        "text": "播放器音量 (%)",
+        "type": "slider",
+        "min": 0,
+        "max": 100,
+        "value": 75
+      },
+      "fps_limit": {
+        "order": 6,
+        "text": "帧率上限",
+        "type": "combo",
+        "value": "60",
+        "options": [
+          { "label": "不限制（原生刷新率）", "value": "0" },
+          { "label": "60 FPS（推荐）", "value": "60" },
+          { "label": "30 FPS（省电）", "value": "30" }
+        ]
+      },
+      "res_scale": {
+        "order": 7,
+        "text": "渲染分辨率比例",
+        "type": "combo",
+        "value": "1.0",
+        "options": [
+          { "label": "100% 原生清晰", "value": "1.0" },
+          { "label": "85% 均衡", "value": "0.85" },
+          { "label": "70% 流畅省电", "value": "0.7" },
+          { "label": "50% 极速", "value": "0.5" }
+        ]
+      }
+    }
+  },
+  "preview": "preview.jpg",
+  "tags": ["Anime", "Music", "Relaxing"],
+  "title": "Nientum - CG与音乐剧场壁纸",
+  "type": "web"
+}

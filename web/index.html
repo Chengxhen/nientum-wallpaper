@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script>
+  /* Wallpaper Engine 桌面会向 html 注入 transform: scaleX(-1) 造成左右镜像，这里强制还原 */
+  (function () {
+    function clearMirror() {
+      var h = document.documentElement;
+      if (h && h.style && h.style.transform && h.style.transform !== 'none') {
+        h.style.transform = 'none';
+      }
+    }
+    clearMirror();
+    document.addEventListener('DOMContentLoaded', clearMirror);
+    window.addEventListener('load', clearMirror);
+    setInterval(clearMirror, 1200);
+  })();
+  </script>
+  <script>
+  /* 全局渲染设置：设置中心的「帧率上限」「渲染分辨率」对整个壁纸统一生效。
+     所有 requestAnimationFrame 动画（背景舞台、Spine、可视化、卡片动效、封票架、各列表滚动……）
+     都经过同一个帧闸门，按设定帧率出帧；各画布的分辨率统一乘以 resScale。 */
+  (function () {
+    var nativeRAF = window.requestAnimationFrame.bind(window);
+    var queue = new Map();
+    var seq = 0, pumpId = 0, lastFlush = 0;
+    var R = window.NientumRender = {
+      fpsLimit: 60,
+      resScale: 1,
+      set: function (o) {
+        if (!o) return;
+        if (typeof o.fpsLimit === 'number' && isFinite(o.fpsLimit)) R.fpsLimit = Math.max(0, Math.min(240, o.fpsLimit));
+        if (typeof o.resScale === 'number' && isFinite(o.resScale)) R.resScale = Math.max(0.4, Math.min(1, o.resScale));
+      },
+      // 画布像素比：设备像素比（上限 maxDpr）× 渲染分辨率
+      pixelRatio: function (maxDpr) {
+        return Math.min(window.devicePixelRatio || 1, maxDpr || 2) * R.resScale;
+      }
+    };
+    function pump(now) {
+      pumpId = 0;
+      var minD = R.fpsLimit > 0 ? 1000 / R.fpsLimit : 0;
+      if (minD > 0 && lastFlush) {
+        // 累加式节拍：高刷屏下也能稳定逼近设定帧率，不会因取整掉成更低档位
+        if (now < lastFlush + minD - 1.5) { pumpId = nativeRAF(pump); return; }
+        lastFlush = (now - lastFlush > minD * 2) ? now : lastFlush + minD;
+      } else {
+        lastFlush = now;
+      }
+      var cbs = queue; queue = new Map();
+      cbs.forEach(function (cb) { try { cb(now); } catch (e) { setTimeout(function () { throw e; }); } });
+    }
+    window.requestAnimationFrame = function (cb) {
+      var id = ++seq;
+      queue.set(id, cb);
+      if (!pumpId) pumpId = nativeRAF(pump);
+      return id;
+    };
+    window.cancelAnimationFrame = function (id) { queue.delete(id); };
+  })();
+  </script>
+  <title>Nientum - CG与音乐剧场壁纸</title>
+  <link rel="stylesheet" href="css/theater.css" />
+</head>
+<body class="mode-capsule">
+  <!-- 背景舞台：单画布合成 4K 多层动态花海 / 静态 CG（绕开 CEF 的 256px 分块缓存） -->
+  <div id="stage-wrap">
+    <canvas id="stage-gl"></canvas>
+    <video id="wp-video-layer" class="wp-video-layer" muted loop playsinline preload="auto"></video>
+    <canvas id="wp-spine-layer" class="wp-spine-layer" aria-hidden="true"></canvas>
+    <canvas id="fx-stage"></canvas>
+    <div id="stage-vignette"></div>
+  </div>
+
+  <!-- 桌面上的音频可视化：脚灯频谱柱 + 精细光环（桌面模式可见，剧场展开后自动淡出） -->
+  <canvas id="viz-canvas" aria-hidden="true"></canvas>
+
+  <!-- 桌面左侧信息栏：双行大时钟 + 网易云竖排歌词 + 向右展开的快捷抽屉（卡片左缘与屏幕左缘之间） -->
+  <div id="desktop-side-panel" aria-hidden="true">
+    <div id="side-status" class="side-status">
+      <div class="ss-hour" id="ss-hour">00</div>
+      <div class="ss-min" id="ss-min">00</div>
+    </div>
+
+    <!-- 桌面歌词浮层（仅桌面模式且播放网易云曲目开启歌词时显示，竖向排布） -->
+    <div id="desktop-lyric-box" aria-hidden="true">
+      <div id="desktop-lyric-main"></div>
+      <div id="desktop-lyric-sub"></div>
+    </div>
+
+    <div id="side-drawer" class="side-drawer">
+      <div class="sd-shell" id="sd-shell">
+        <div class="sd-tab" id="sd-tab" title="向右展开快捷抽屉">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 L10.5 8 L6 12.5" /></svg>
+          <span class="sd-tab-label">快捷抽屉</span>
+        </div>
+        <div class="sd-main">
+          <div class="sd-head">
+            <button type="button" class="sd-arrow-btn" id="btn-drawer-toggle" title="向左收起快捷抽屉">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 L5.5 8 L10 12.5" /></svg>
+            </button>
+            <span class="sd-title" id="sd-title">快捷抽屉</span>
+            <span class="sd-tools">
+              <button type="button" class="sd-tool-btn" id="btn-drawer-pick" title="选择抽屉对应的文件夹">📁</button>
+              <button type="button" class="sd-tool-btn" id="btn-drawer-open" title="在资源管理器中打开该文件夹">↗</button>
+              <button type="button" class="sd-tool-btn" id="btn-drawer-refresh" title="刷新">⟳</button>
+            </span>
+          </div>
+          <div class="sd-grid" id="sd-grid"></div>
+        </div>
+        <div class="sd-resizer" id="sd-resizer" title="左右拖动调整抽屉宽度"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧桌面封票架（1:1 自由选曲封票尺寸，悬停弹出，双击打开 Windows 文件夹，CG 悬停 1s 弹出文件夹预览窗） -->
+  <div id="desktop-ticket-dock" aria-hidden="true">
+    <div class="dock-drawer" id="dock-drawer">
+      <div class="dock-drawer-head">
+        <div class="dock-drawer-titles">
+          <div class="dock-drawer-title" id="dock-drawer-title">桌面</div>
+          <div class="dock-drawer-path" id="dock-drawer-path"></div>
+        </div>
+        <div class="dock-drawer-actions">
+          <button type="button" class="dock-head-btn" id="btn-dock-up" title="上一级目录">↑</button>
+          <button type="button" class="dock-head-btn" id="btn-dock-explorer" title="在 Windows 资源管理器中打开">📂</button>
+          <button type="button" class="dock-head-btn" id="btn-dock-close" title="关闭预览窗">✕</button>
+        </div>
+      </div>
+      <div class="dock-search-wrap">
+        <input type="text" id="dock-search" placeholder="筛选文件或子文件夹..." autocomplete="off" />
+      </div>
+      <div class="dock-drawer-items" id="dock-drawer-items"></div>
+    </div>
+    <div class="dock-popover" id="dock-popover">
+      <div class="dock-pop-head">
+        <span id="dock-pop-title">更换封票样式</span>
+        <button type="button" class="dock-pop-close" id="btn-dock-pop-close">✕</button>
+      </div>
+      <div class="dock-rename-row" id="dock-rename-row">
+        <input type="text" id="dock-rename-input" maxlength="20" placeholder="输入封票名称..." />
+        <button type="button" class="dock-pop-ok" id="btn-dock-rename-ok">保存</button>
+      </div>
+      <button type="button" class="dock-pick-img-btn" id="btn-dock-pick-img">🖼 选择本地自定义图片...</button>
+      <div class="dock-card-picker" id="dock-card-picker"></div>
+    </div>
+    <div class="dock-toast" id="dock-toast"></div>
+    <div class="dock-scroll-viewport" id="dock-scroll-viewport">
+      <div class="dock-tickets" id="dock-tickets"></div>
+    </div>
+  </div>
+
+  <!-- 右上角迷你音乐播放栏 -->
+  <div id="capsule-dock">
+    <div class="capsule-bar">
+      <button type="button" class="cap-collapse-btn" id="btn-cap-collapse" title="收起为方形悬浮球">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 L10.5 8 L6 12.5" /></svg>
+      </button>
+      <div class="cap-disc" id="cap-disc" title="点击展开自由选曲">
+        <img id="cap-cover" alt="" />
+        <span class="cap-hole"></span>
+      </div>
+      <div class="cap-info" id="cap-open-theater" title="点击展开自由选曲">
+        <div class="cap-title" id="cap-title">Liora's Song</div>
+        <div class="cap-sub">
+          <span id="cap-act">序章 · 无名氏的故事</span>
+          <span class="sep">·</span>
+          <span id="cap-time">00:00 / 00:00</span>
+        </div>
+        <div class="cap-prog-track" id="cap-prog-track" title="点击或按住拖动调节播放进度">
+          <div class="cap-prog-fill" id="cap-prog-fill"></div>
+        </div>
+      </div>
+      <div class="cap-actions">
+        <button class="icon-btn" id="btn-cap-prev" title="上一首">◀</button>
+        <button class="icon-btn play-btn" id="btn-cap-play" title="播放 / 暂停">▶</button>
+        <button class="icon-btn" id="btn-cap-next" title="下一首">▶▶</button>
+        <button class="icon-btn ncm-like-icon" id="btn-cap-like" title="收藏当前歌曲" style="display:none">♡</button>
+        <button class="icon-btn loop-btn" id="btn-cap-loop" title="切换循环模式：列表循环"></button>
+      </div>
+      <svg class="cap-orb-ring" viewBox="0 0 80 80" aria-hidden="true">
+        <defs>
+          <linearGradient id="capOrbGold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffeab8" />
+            <stop offset="50%" stop-color="#e5c687" />
+            <stop offset="100%" stop-color="#c99543" />
+          </linearGradient>
+        </defs>
+        <path class="cap-orb-track" d="M 40 3 L 59 3 A 18 18 0 0 1 77 21 L 77 59 A 18 18 0 0 1 59 77 L 21 77 A 18 18 0 0 1 3 59 L 3 21 A 18 18 0 0 1 21 3 Z" pathLength="100" />
+        <path class="cap-orb-prog" id="cap-orb-prog" d="M 40 3 L 59 3 A 18 18 0 0 1 77 21 L 77 59 A 18 18 0 0 1 59 77 L 21 77 A 18 18 0 0 1 3 59 L 3 21 A 18 18 0 0 1 21 3 Z" pathLength="100" />
+      </svg>
+    </div>
+  </div>
+
+  <!-- 桌面壁纸播放格式：卡片播放舞台（在设置中切换为“卡片播放”时显示于桌面） -->
+  <div id="desktop-card-stage" aria-hidden="true">
+    <div class="cp-stage">
+      <div class="cp-dots" id="cp-dots"></div>
+      <div class="cp-card-wrap">
+        <div class="cp-card" id="cp-card" title="点击播放 / 暂停">
+          <img id="cp-cover" src="assets/covers/cover_ending.png" alt="" />
+          <canvas id="cp-dynamic-canvas"></canvas>
+          <div class="cp-card-frame"></div>
+        </div>
+      </div>
+      <div class="cp-meta">
+        <div class="cp-title" id="cp-title">Liora's Song</div>
+        <div class="cp-sub" id="cp-sub">QueseraGames Co., Ltd. · 序章</div>
+      </div>
+      <div class="cp-bar">
+        <div class="cp-prog-row">
+          <span class="cp-time" id="cp-time-cur">00:00</span>
+          <div class="now-progress cp-progress" id="cp-progress" title="点击或按住拖动调节播放进度">
+            <div class="now-progress-track">
+              <div class="now-progress-fill" id="cp-progress-fill"></div>
+              <div class="now-progress-thumb" id="cp-progress-thumb"></div>
+            </div>
+          </div>
+          <span class="cp-time" id="cp-time-dur">00:00</span>
+        </div>
+        <div class="cp-controls">
+          <div class="ctrl-group">
+            <button class="warm-btn sm" id="btn-cp-bar-prev">◀ 上一首</button>
+            <button class="warm-btn gold" id="btn-cp-play">▶ 播放</button>
+            <button class="warm-btn sm" id="btn-cp-bar-next">下一首 ▶</button>
+            <button class="warm-btn sm loop-btn" id="btn-cp-loop" title="切换循环模式"></button>
+            <button class="warm-btn sm" id="btn-cp-theater" title="打开选曲与设置">☰ 选曲</button>
+          </div>
+          <div class="vol-group">
+            <span class="vol-label">音量</span>
+            <div class="gold-slider vol-slider" id="cp-vol-slider" data-min="0" data-max="100" data-value="75" title="点击或按住拖动调节音量">
+              <div class="gold-slider-track">
+                <div class="gold-slider-fill"></div>
+                <div class="gold-slider-thumb"></div>
+              </div>
+            </div>
+            <span class="vol-val" id="cp-vol-val">75%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 剧场展开态（轻量级高斯模糊壁纸底图 + 1920基准缩放舞台，零显存爆tile） -->
+  <div id="theater-overlay" aria-hidden="true">
+    <img id="theater-blur-bg" alt="" />
+    <div class="theater-backdrop" id="theater-backdrop"></div>
+    <div class="theater-vig"></div>
+    <div class="theater-shell" id="theater-shell">
+      <div class="film-banner" id="film-banner"></div>
+      <div class="head-fade"></div>
+
+      <!-- 顶部导航与功能区 -->
+      <header class="theater-header">
+        <div class="header-actions">
+          <button class="tab-btn active" data-view="music">自由选曲</button>
+          <button class="tab-btn" data-view="netease">网易云音乐</button>
+          <button class="tab-btn" data-view="wallpapers">壁纸选图</button>
+          <button class="warm-btn" id="btn-settings" title="调节渲染分辨率与帧率">⚙ 设置</button>
+          <button class="warm-btn" id="btn-close-theater">收起至桌面</button>
+        </div>
+      </header>
+
+      <!-- 选曲界面全面设置中心（大尺寸双栏面板） -->
+      <div class="settings-pop" id="settings-pop" aria-hidden="true">
+        <div class="sp-head">
+          <div class="sp-title">壁纸与桌面设置中心</div>
+          <button type="button" class="sp-close-btn" id="btn-close-settings" title="关闭设置">✕</button>
+        </div>
+        <div class="sp-grid">
+          <div class="sp-section">
+            <div class="sp-sec-title">画面与动效</div>
+            <div class="sp-row">
+              <span class="sp-label">渲染分辨率</span>
+              <div class="sp-opts" id="opt-res">
+                <button type="button" class="sp-chip" data-res="1.0">原生</button>
+                <button type="button" class="sp-chip" data-res="0.85">85%</button>
+                <button type="button" class="sp-chip" data-res="0.7">70%</button>
+                <button type="button" class="sp-chip" data-res="0.5">50%</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">帧率上限 (0=不限)</span>
+              <div class="sp-num-wrap">
+                <button type="button" class="sp-step-btn" id="btn-fps-dec" title="减少 10 FPS">－</button>
+                <input type="text" inputmode="numeric" id="inp-fps" value="60" maxlength="3" autocomplete="off" title="点击输入帧率" />
+                <button type="button" class="sp-step-btn" id="btn-fps-inc" title="增加 10 FPS">＋</button>
+                <span class="sp-unit">FPS</span>
+              </div>
+            </div>
+            <div class="fps-keypad" id="fps-keypad" aria-hidden="true">
+              <div class="fps-kp-grid">
+                <button type="button" class="fps-kp-btn" data-k="1">1</button>
+                <button type="button" class="fps-kp-btn" data-k="2">2</button>
+                <button type="button" class="fps-kp-btn" data-k="3">3</button>
+                <button type="button" class="fps-kp-btn" data-k="4">4</button>
+                <button type="button" class="fps-kp-btn" data-k="5">5</button>
+                <button type="button" class="fps-kp-btn" data-k="6">6</button>
+                <button type="button" class="fps-kp-btn" data-k="7">7</button>
+                <button type="button" class="fps-kp-btn" data-k="8">8</button>
+                <button type="button" class="fps-kp-btn" data-k="9">9</button>
+                <button type="button" class="fps-kp-btn fn" data-k="clear">清空</button>
+                <button type="button" class="fps-kp-btn" data-k="0">0</button>
+                <button type="button" class="fps-kp-btn fn" data-k="back">⌫</button>
+              </div>
+              <button type="button" class="warm-btn gold sm fps-kp-done" id="btn-fps-kp-done">确定</button>
+            </div>
+            <div class="sp-row sp-fps-presets">
+              <span class="sp-label">帧率预设</span>
+              <div class="sp-opts" id="opt-fps-presets">
+                <button type="button" class="sp-chip" data-fps="0">不限</button>
+                <button type="button" class="sp-chip" data-fps="30">30</button>
+                <button type="button" class="sp-chip" data-fps="60">60</button>
+                <button type="button" class="sp-chip" data-fps="120">120</button>
+                <button type="button" class="sp-chip" data-fps="165">165</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">Spine 动画速度</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-spine-speed" data-min="20" data-max="200" data-value="100" title="调节 Spine 动态壁纸的动画播放速度">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-spine-speed">100%</span>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">氛围粒子密度</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-particles-set" data-min="0" data-max="150" data-value="80" title="按住拖动调节氛围粒子密度">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-particles-set">80%</span>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">音频可视化效果</span>
+              <div class="sp-opts sp-viz">
+                <label class="sp-toggle"><input type="checkbox" id="chk-footlights" /><span>脚灯</span></label>
+                <label class="sp-toggle"><input type="checkbox" id="chk-halo" /><span>光环</span></label>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">音频律动强度</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-viz-gain" data-min="30" data-max="200" data-value="100" title="调节脚灯、光环与画面动效随音乐起伏的强度">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-viz-gain">100%</span>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">失焦背景模糊</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-defocus-blur" /><span>启用（失焦 300ms 后渐变模糊）</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">界面玻璃材质</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-ui-glass" /><span>启用（选曲界面与弹窗）</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">剧场界面透明度</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-ui-alpha" data-min="60" data-max="100" data-value="96" title="调节剧场面板背景不透明度">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-ui-alpha">96%</span>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">字体水波配色</span>
+              <div class="sp-font-wave-wrap">
+                <label class="sp-toggle"><input type="checkbox" id="chk-font-wave" /><span>启用（桌面时钟与歌词）</span></label>
+                <div class="sp-color-tools">
+                  <input type="color" id="inp-font-wave-color" class="sp-color-inp" value="#6ec6ff" title="自定义左下角颜色" />
+                  <div class="sp-color-swatches" id="opt-font-wave-swatches">
+                    <button type="button" class="sp-swatch" data-color="#6ec6ff" style="--sw:#6ec6ff" title="星海蓝"></button>
+                    <button type="button" class="sp-swatch" data-color="#ff9ec7" style="--sw:#ff9ec7" title="樱花粉"></button>
+                    <button type="button" class="sp-swatch" data-color="#b896ff" style="--sw:#b896ff" title="暮星紫"></button>
+                    <button type="button" class="sp-swatch" data-color="#6ef0d2" style="--sw:#6ef0d2" title="薄荷青"></button>
+                    <button type="button" class="sp-swatch" data-color="#ff9a76" style="--sw:#ff9a76" title="珊瑚橘"></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="sp-section">
+            <div class="sp-sec-title">桌面交互与组件</div>
+            <div class="sp-row">
+              <span class="sp-label">桌面播放格式</span>
+              <div class="sp-opts" id="opt-desktop-format">
+                <button type="button" class="sp-chip active" data-format="wallpaper">全屏壁纸</button>
+                <button type="button" class="sp-chip" data-format="card">卡片播放</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">卡片玻璃材质</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-card-glass" /><span>启用（卡片播放时生效）</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">卡片悬停倾斜</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-card-tilt" data-min="0" data-max="500" data-value="100" title="调节鼠标落在卡片上触发的 3D 倾斜强弱 (0% 为关闭，100% 为默认)">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-card-tilt">100%</span>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">胶囊自动收起</span>
+              <div class="sp-opts" id="opt-capsule-auto">
+                <button type="button" class="sp-chip" data-sec="0">关闭</button>
+                <button type="button" class="sp-chip" data-sec="15">15s</button>
+                <button type="button" class="sp-chip active" data-sec="30">30s</button>
+                <button type="button" class="sp-chip" data-sec="60">60s</button>
+                <button type="button" class="sp-chip" data-sec="120">120s</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">悬浮球展开方式</span>
+              <div class="sp-opts" id="opt-capsule-expand">
+                <button type="button" class="sp-chip active" data-mode="hover">悬停展开</button>
+                <button type="button" class="sp-chip" data-mode="click">点击展开</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">左上角双行时钟</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-side-clock" /><span>显示时钟</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">左下角快捷抽屉</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-side-drawer" /><span>显示抽屉</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">右侧桌面封票文件夹</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-dock-enabled" /><span>启用封票架</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">封票动画柔和度</span>
+              <div class="sp-opts" id="opt-dock-motion">
+                <button type="button" class="sp-chip" data-motion="snappy">灵动</button>
+                <button type="button" class="sp-chip" data-motion="normal">标准</button>
+                <button type="button" class="sp-chip active" data-motion="soft">柔和</button>
+                <button type="button" class="sp-chip" data-motion="silk">极柔</button>
+              </div>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">切歌自动联动背景 CG</span>
+              <label class="sp-toggle"><input type="checkbox" id="chk-sync-cg-set" /><span>自动切换</span></label>
+            </div>
+            <div class="sp-row">
+              <span class="sp-label">桌面歌词字号</span>
+              <div class="sp-range-wrap">
+                <div class="gold-slider" id="sl-lyric-size" data-min="70" data-max="160" data-value="100" title="调节左侧竖排歌词字号">
+                  <div class="gold-slider-track">
+                    <div class="gold-slider-fill"></div>
+                    <div class="gold-slider-thumb"></div>
+                  </div>
+                </div>
+                <span id="val-lyric-size">100%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="sp-footer">
+          <button type="button" class="warm-btn sm" id="btn-reset-settings" title="恢复所有设置到默认值">恢复默认</button>
+          <div class="sp-footer-right">
+            <span class="sp-save-hint" id="sp-save-hint"></span>
+            <button type="button" class="warm-btn gold sm" id="btn-save-settings">保存设置</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 视图 1：1:1 还原鉴赏器（左全高弧形封票列表 + 右超大金唱片 + 唱片下方当前曲目） -->
+      <section class="theater-view active" id="view-music">
+        <div class="music-tabs-bar">
+          <button class="tab-arrow" id="cat-prev">◀</button>
+          <div class="chapter-strip" id="chapter-strip"></div>
+          <button class="tab-arrow" id="cat-next">▶</button>
+        </div>
+        <div class="track-stats">
+          <span id="stat-idx">曲目 01 / 88</span>
+          <span id="stat-total">88 曲 · 14 章</span>
+        </div>
+        <div class="music-hline"></div>
+
+        <!-- 左侧：上下全高弧形封票列表 + 右侧可拖拽金色滚动条与上下翻页按钮 -->
+        <div class="track-list" id="track-list"></div>
+        <div class="arc-scroll-wrap">
+          <button class="arc-scroll-btn" id="btn-scroll-up" title="向上滚动">▲</button>
+          <div class="arc-scrollbar" id="arc-scrollbar" title="按住拖动或点击快速定位">
+            <div class="arc-scroll-thumb" id="arc-scroll-thumb"></div>
+          </div>
+          <button class="arc-scroll-btn" id="btn-scroll-down" title="向下滚动">▼</button>
+        </div>
+
+        <!-- 右侧：超大金色黑胶唱片 -->
+        <div class="vinyl-stage" id="vinyl-stage" title="点击唱片播放 / 暂停">
+          <div class="vinyl-glow" id="vinyl-glow"></div>
+          <div class="vinyl-disc" id="vinyl-disc">
+            <img class="vinyl-ring" src="assets/ui/LP_original.png" alt="" />
+            <div class="vinyl-cover-back"></div>
+            <div class="vinyl-cover-mask">
+              <img id="vinyl-cover" src="assets/covers/cover_ending.png" alt="" />
+            </div>
+            <div class="vinyl-center-hole"></div>
+          </div>
+        </div>
+
+        <!-- 歌曲名、作曲家、序号叠在唱片下缘 -->
+        <div class="record-meta">
+          <div class="record-title" id="rec-title">Liora's Song</div>
+          <div class="record-artist" id="rec-artist">QueseraGames Co., Ltd.</div>
+          <div class="record-chapter" id="rec-chapter">序章 · 01 / 09</div>
+        </div>
+
+        <div class="local-card-cover-opt-wrap">
+          <label class="ncm-card-cover-opt" title="开启后，自由选曲切歌时桌面背景同步切换到当前歌曲对应的官方 CG">
+            <input type="checkbox" id="chk-sync-cg-local" />
+            <span>同步桌面壁纸</span>
+          </label>
+          <label class="ncm-card-cover-opt" title="开启后，桌面卡片模式展示当前歌曲封面，否则保留所选桌面壁纸">
+            <input type="checkbox" id="chk-local-cover-card" />
+            <span>套用歌曲封面</span>
+          </label>
+        </div>
+
+        <!-- 唱片正下方（原试听条位置）：当前曲目控制栏 -->
+        <div class="now-bar">
+          <div class="now-top">
+            <span class="now-badge" id="now-badge">当前曲目</span>
+            <span class="now-title" id="now-title">Liora's Song</span>
+            <span class="now-time" id="now-time">00:00 / 00:00</span>
+          </div>
+          <div class="now-progress" id="now-progress" title="点击或按住拖动调节播放进度">
+            <div class="now-progress-track">
+              <div class="now-progress-fill" id="now-progress-fill"></div>
+              <div class="now-progress-thumb" id="now-progress-thumb"></div>
+            </div>
+          </div>
+          <div class="now-controls">
+            <div class="ctrl-group">
+              <button class="warm-btn sm" id="btn-prev">◀ 上一首</button>
+              <button class="warm-btn gold" id="btn-play">▶ 播放</button>
+              <button class="warm-btn sm" id="btn-next">下一首 ▶</button>
+              <button class="warm-btn sm loop-btn" id="btn-loop" title="切换循环模式"></button>
+              <button class="warm-btn sm" id="btn-set-default" title="将当前曲目设为启动默认播放">☆ 设为默认</button>
+            </div>
+            <div class="vol-group">
+              <span class="vol-label">音量</span>
+              <div class="gold-slider vol-slider" id="vol-slider" data-min="0" data-max="100" data-value="75" title="点击或按住拖动调节音量">
+                <div class="gold-slider-track">
+                  <div class="gold-slider-fill"></div>
+                  <div class="gold-slider-thumb"></div>
+                </div>
+              </div>
+              <span class="vol-val" id="vol-val">75%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 视图 2：壁纸库 -->
+      <section class="theater-view" id="view-wallpapers">
+        <div class="wp-toolbar">
+          <div class="wp-cats" id="wp-cats"></div>
+          <div class="wp-sliders">
+            <label>桌面氛围粒子
+              <div class="gold-slider" id="sl-particles" data-min="0" data-max="150" data-value="80" title="按住拖动调节桌面氛围粒子密度">
+                <div class="gold-slider-track">
+                  <div class="gold-slider-fill"></div>
+                  <div class="gold-slider-thumb"></div>
+                </div>
+              </div>
+            </label>
+            <button type="button" class="warm-btn sm wp-import-btn" id="btn-wp-import">＋ 导入壁纸</button>
+          </div>
+        </div>
+        <div class="wp-grid" id="wp-grid"></div>
+      </section>
+
+      <!-- 视图 3：网易云音乐在线播放（与自由选曲同一套封票 + 唱片布局） -->
+      <section class="theater-view" id="view-netease">
+        <div class="ncm-topbar">
+          <div class="ncm-user-box" id="ncm-user-box">
+            <img class="ncm-avatar" id="ncm-avatar" src="assets/covers/cover_ending.png" alt="" />
+            <div class="ncm-user-meta">
+              <div class="ncm-user-name" id="ncm-user-name">正在连接网易云...</div>
+              <div class="ncm-user-sub" id="ncm-user-sub">内置代理随壁纸引擎自动启动</div>
+            </div>
+            <button class="warm-btn sm" id="btn-ncm-login" style="display:none">扫码登录</button>
+            <button class="warm-btn sm" id="btn-ncm-logout" style="display:none">退出</button>
+            <button class="warm-btn sm" id="btn-ncm-retry">刷新状态</button>
+          </div>
+
+          <div class="ncm-quality-box" id="ncm-quality-box">
+            <span class="ncm-quality-label">音质</span>
+            <button type="button" class="ncm-q-btn" id="ncm-quality-btn" title="选择网易云音质">极高 ▾</button>
+            <div class="ncm-q-menu" id="ncm-quality-menu"></div>
+          </div>
+
+          <div class="ncm-search-box">
+            <input type="text" id="ncm-search-inp" placeholder="点击直接输入歌名 / ⌨ 打开搜歌面板" autocomplete="off" />
+            <button type="button" class="warm-btn sm" id="btn-ncm-paste" title="直接读取剪贴板里的歌名并搜索（支持中文）">📋 粘贴</button>
+            <button type="button" class="warm-btn sm" id="btn-ncm-kbd" title="展开内置软键盘与搜索历史">⌨</button>
+            <button type="button" class="warm-btn sm gold" id="btn-ncm-search">搜索</button>
+            <div class="ncm-kbd-pop" id="ncm-kbd-pop" aria-hidden="true">
+              <div class="ncm-kbd-head">
+                <span class="ncm-kbd-title">桌面搜歌输入面板（点击即可输入，支持粘贴中文）</span>
+                <div class="ncm-kbd-tools">
+                  <button type="button" class="sp-chip" id="btn-ncm-native-box" title="尝试唤起系统输入法悬浮框">系统输入法</button>
+                  <button type="button" class="sp-chip" id="btn-ncm-kbd-close">收起</button>
+                </div>
+              </div>
+              <div class="ncm-kbd-tags" id="ncm-kbd-tags"></div>
+              <div class="ncm-kbd-rows" id="ncm-kbd-rows"></div>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="ncm-pl-bar">
+          <div class="ncm-playlists" id="ncm-playlists"></div>
+        </div>
+        <div class="ncm-stats">
+          <span id="ncm-list-title">曲目列表</span>
+          <span id="ncm-list-count"></span>
+        </div>
+        <div class="ncm-hline"></div>
+
+        <!-- 左侧：与自由选曲相同的封票卡片；封面用网易云专辑图 -->
+        <div class="ncm-card-list" id="ncm-card-list"></div>
+
+        <!-- 右侧：超大金色黑胶唱片，中心为当前歌曲专辑封面 -->
+        <div class="vinyl-stage ncm-vinyl-stage" id="ncm-vinyl-stage" title="点击唱片播放 / 暂停">
+          <div class="vinyl-glow" id="ncm-vinyl-glow"></div>
+          <div class="vinyl-disc" id="ncm-vinyl-disc">
+            <img class="vinyl-ring" src="assets/ui/LP_original.png" alt="" />
+            <div class="vinyl-cover-back"></div>
+            <div class="vinyl-cover-mask">
+              <img id="ncm-vinyl-cover" src="assets/covers/cover_ending.png" alt="" />
+            </div>
+            <div class="vinyl-center-hole"></div>
+          </div>
+        </div>
+
+        <div class="record-meta ncm-record-meta">
+          <div class="record-title" id="ncm-rec-title">网易云音乐</div>
+          <div class="record-artist" id="ncm-rec-artist">登录后加载你的歌单</div>
+          <div class="record-chapter" id="ncm-rec-chapter">在线播放</div>
+        </div>
+
+        <div class="ncm-card-cover-opt-wrap">
+          <label class="ncm-card-cover-opt" title="开启后，桌面卡片模式将显示当前网易云歌曲的专辑封面，否则使用背景 CG">
+            <input type="checkbox" id="chk-ncm-cover-card" />
+            <span>专辑封面应用到桌面卡片</span>
+          </label>
+          <label class="ncm-card-cover-opt" title="开启后，在桌面壁纸/卡片上实时同步显示当前网易云歌曲的歌词">
+            <input type="checkbox" id="chk-ncm-lyric" />
+            <span>桌面显示歌词</span>
+          </label>
+        </div>
+
+        <div class="now-bar ncm-now-bar">
+          <div class="now-top">
+            <span class="now-badge" id="ncm-now-badge">网易云在线</span>
+            <span class="now-title" id="ncm-now-title">未选择歌曲</span>
+            <button type="button" class="ncm-like-heart" id="btn-ncm-like" title="收藏当前歌曲" aria-label="收藏当前歌曲" style="display:none">♡</button>
+            <span class="now-time" id="ncm-now-time">00:00 / 00:00</span>
+          </div>
+          <div class="now-progress" id="ncm-now-progress" title="点击或按住拖动调节播放进度">
+            <div class="now-progress-track">
+              <div class="now-progress-fill" id="ncm-now-progress-fill"></div>
+              <div class="now-progress-thumb" id="ncm-now-progress-thumb"></div>
+            </div>
+          </div>
+          <div class="now-controls">
+            <div class="ctrl-group">
+              <button class="warm-btn sm" id="btn-ncm-prev">◀ 上一首</button>
+              <button class="warm-btn gold" id="btn-ncm-play">▶ 播放</button>
+              <button class="warm-btn sm" id="btn-ncm-next">下一首 ▶</button>
+              <button class="warm-btn sm loop-btn" id="btn-ncm-loop" title="切换循环模式"></button>
+            </div>
+            <div class="vol-group">
+              <span class="vol-label">音量</span>
+              <div class="gold-slider vol-slider" id="ncm-vol-slider" data-min="0" data-max="100" data-value="75" title="按住拖动调节音量">
+                <div class="gold-slider-track">
+                  <div class="gold-slider-fill"></div>
+                  <div class="gold-slider-thumb"></div>
+                </div>
+              </div>
+              <span class="vol-val" id="ncm-vol-val">75%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ncm-login-overlay" id="ncm-login-overlay">
+          <div class="ncm-login-card">
+            <div class="ncm-login-title">网易云音乐扫码登录</div>
+            <div class="ncm-login-desc" id="ncm-login-desc">打开手机网易云音乐 App 扫一扫二维码，登录后自动加载歌单；凭证保存在壁纸工程内</div>
+            <div class="ncm-qr-box" id="ncm-qr-box">
+              <img id="ncm-qr-img" alt="登录二维码" />
+              <div class="ncm-qr-placeholder" id="ncm-qr-placeholder">正在连接内置网易云代理...</div>
+            </div>
+            <div class="ncm-login-status" id="ncm-login-status">等待代理就绪</div>
+            <div class="ncm-login-actions">
+              <button class="warm-btn sm gold" id="btn-ncm-qr-refresh">刷新二维码</button>
+              <button class="warm-btn sm" id="btn-ncm-guest-search">先试着搜歌播放</button>
+            </div>
+            <div class="ncm-service-tip" id="ncm-service-tip">
+              代理已内置在本壁纸工程中，随 Wallpaper Engine 自动启动和关闭；若刚启动壁纸，请稍等几秒后点「刷新状态」。
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="wp-import-pop" id="wp-import-pop" aria-hidden="true">
+    <div class="wp-import-mask"></div>
+    <div class="wp-import-card">
+      <div class="wp-import-head">
+        <div>
+          <div class="wp-import-title">导入其他壁纸</div>
+          <div class="wp-import-sub">本地图片/视频，或从 Wallpaper Engine 导入视频壁纸/自动录制场景壁纸</div>
+        </div>
+        <button type="button" class="wp-import-close" id="btn-wp-import-close" title="关闭">✕</button>
+      </div>
+      <div class="wp-import-body">
+        <div class="wp-import-local">
+          <button type="button" class="warm-btn gold" id="btn-wp-pick-local">选择本地图片 / 视频</button>
+          <div class="wp-import-hint">支持多选批量导入：png/jpg/webp/bmp 静态图，或 mp4/webm/mov/mkv/avi/m4v/gif 视频动图（自动去音轨并单通转码为 CEF 原生 WebM VP9）</div>
+        </div>
+        <div class="wp-import-we-head">
+          <span>从 Wallpaper Engine 导入</span>
+          <button type="button" class="warm-btn sm" id="btn-wp-we-refresh">刷新</button>
+        </div>
+        <div class="wp-import-we-opts">
+          <div class="wp-import-dur" title="场景壁纸录制分辨率（受限于当前主显示器物理分辨率）">
+            <span>录制画质</span>
+            <div class="wp-we-pills" id="sel-we-resolution">
+              <button type="button" class="cat-pill sm" data-res="1080p">1080p</button>
+              <button type="button" class="cat-pill sm" data-res="2k">2K</button>
+              <button type="button" class="cat-pill sm active" data-res="4k">4K</button>
+            </div>
+          </div>
+          <div class="wp-import-dur" title="场景壁纸自动录制时长（5~300秒）">
+            <span>录制时长</span>
+            <div class="wp-we-pills" id="sel-we-duration">
+              <button type="button" class="cat-pill sm" data-dur="10">10秒</button>
+              <button type="button" class="cat-pill sm active" data-dur="15">15秒</button>
+              <button type="button" class="cat-pill sm" data-dur="30">30秒</button>
+              <button type="button" class="cat-pill sm" data-dur="60">60秒</button>
+            </div>
+            <label class="wp-dur-custom" title="自定义录制时长（5~300秒）">
+              <input type="number" id="inp-we-duration" min="5" max="300" step="1" value="15" />
+              <span>秒</span>
+            </label>
+          </div>
+          <div class="wp-import-dur" title="场景壁纸首尾无缝循环处理">
+            <span>无缝循环</span>
+            <div class="wp-we-pills" id="sel-we-loop">
+              <button type="button" class="cat-pill sm" data-loop="none">关闭</button>
+              <button type="button" class="cat-pill sm active" data-loop="crossfade">首尾柔化</button>
+              <button type="button" class="cat-pill sm" data-loop="match">智能匹配</button>
+            </div>
+          </div>
+        </div>
+        <div class="wp-import-we-filter">
+          <input type="text" class="wp-we-search" id="inp-we-search" placeholder="搜索 WE 壁纸名称..." autocomplete="off" />
+          <div class="wp-we-pills" id="wp-we-pills">
+            <button type="button" class="cat-pill sm active" data-we-filter="all">全部</button>
+            <button type="button" class="cat-pill sm" data-we-filter="scene">可录制场景</button>
+            <button type="button" class="cat-pill sm" data-we-filter="video">视频</button>
+            <button type="button" class="cat-pill sm" data-we-filter="static">静态/网页</button>
+          </div>
+        </div>
+        <div class="wp-import-we-note">视频壁纸可直接导入（自动单通转码 WebM VP9，最高保留 4K 3840×2160）；场景壁纸可自选画质（1080p / 2K / 4K，不超过当前主屏分辨率）与任意时长（5~300 秒），点「录制并导入」将自动拉起 WE 窗口录制并封装为 WebM，期间请不要关闭弹出窗口。</div>
+        <div class="wp-import-we-list" id="wp-import-we-list">
+          <div class="wp-import-empty">点“刷新”扫描已安装的 Wallpaper Engine 壁纸</div>
+        </div>
+        <div class="wp-import-progress" id="wp-import-progress"><div class="wp-import-progress-fill" id="wp-import-progress-fill"></div></div>
+        <div class="wp-import-status" id="wp-import-status"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wp-crop-pop" id="wp-crop-pop" aria-hidden="true">
+    <div class="wp-crop-mask"></div>
+    <div class="wp-crop-card">
+      <div class="wp-import-head">
+        <div>
+          <div class="wp-import-title" id="wp-crop-title">调整桌面壁纸裁切区域</div>
+          <div class="wp-import-sub" id="wp-crop-sub">在桌面比例取景框内拖动画面或滚轮缩放，调节应用到桌面的显示部分</div>
+        </div>
+        <button type="button" class="wp-import-close" id="btn-wp-crop-close" title="关闭">✕</button>
+      </div>
+      <div class="wp-crop-body">
+        <div class="wp-crop-workspace" id="wp-crop-workspace">
+          <div class="wp-crop-stage" id="wp-crop-stage">
+            <img id="wp-crop-img" alt="" draggable="false" />
+            <video id="wp-crop-video" muted loop playsinline preload="auto"></video>
+            <div class="wp-crop-grid" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div class="wp-crop-badge" id="wp-crop-info">加载中...</div>
+          </div>
+        </div>
+        <div class="wp-crop-controls">
+          <div class="wp-crop-zoom-row">
+            <span class="wp-crop-label">缩放倍率</span>
+            <div class="gold-slider wp-crop-slider" id="sl-wp-crop-zoom" data-min="100" data-max="350" data-value="100">
+              <div class="gold-slider-track">
+                <div class="gold-slider-fill" style="width:0%"></div>
+                <div class="gold-slider-thumb" style="left:0%"></div>
+              </div>
+            </div>
+            <span class="wp-crop-val" id="val-wp-crop-zoom">100%</span>
+          </div>
+          <div class="wp-crop-presets">
+            <button type="button" class="cat-pill sm" data-crop-preset="top">靠上</button>
+            <button type="button" class="cat-pill sm" data-crop-preset="bottom">靠下</button>
+            <button type="button" class="cat-pill sm" data-crop-preset="left">靠左</button>
+            <button type="button" class="cat-pill sm" data-crop-preset="right">靠右</button>
+            <button type="button" class="cat-pill sm" data-crop-preset="center">居中适配</button>
+            <button type="button" class="cat-pill sm" data-crop-preset="reset">重置默认</button>
+          </div>
+        </div>
+        <div class="wp-crop-foot">
+          <span class="wp-crop-hint" id="wp-crop-hint">提示：按住取景框内画面直接拖动，滚轮可快速缩放</span>
+          <div class="wp-crop-actions">
+            <button type="button" class="warm-btn" id="btn-wp-crop-skip">保持默认</button>
+            <button type="button" class="warm-btn gold" id="btn-wp-crop-apply">应用到桌面</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/data.js"></script>
+  <script src="js/stage.js"></script>
+  <script src="vendor/spine-webgl.js"></script>
+  <script src="assets/spines/spine-data.js"></script>
+  <script src="js/spine-stage.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/desktop-dock.js"></script>
+  <script src="js/desktop-panel.js"></script>
+</body>
+</html>

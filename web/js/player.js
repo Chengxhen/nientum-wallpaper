@@ -4064,6 +4064,17 @@
       if (!btnCheck || !statusEl) return;
 
       let latestReleaseUrl = 'https://github.com/Chengxhen/nientum-wallpaper/releases';
+      // 更新键：网页端版本号，随增量包一起更新；与 Release tag 比较
+      const WEB_APP_VERSION = 'v2026.11.23.8';
+      const verParts = (v) => String(v || '').replace(/^v/i, '').split(/[.\-+]/).map(x => parseInt(x, 10) || 0);
+      const cmpVer = (a, b) => {
+        const A = verParts(a), B = verParts(b);
+        for (let i = 0; i < Math.max(A.length, B.length); i++) {
+          const d = (A[i] || 0) - (B[i] || 0);
+          if (d) return d;
+        }
+        return 0;
+      };
       let latestFullAsset = null;
       let latestPatchAsset = null;
       let dlPollTimer = 0;
@@ -4090,16 +4101,19 @@
             setUpdStatus((j && j.error) || '检测失败，请确认本地桥接服务已启动', 'err');
             return;
           }
-          if (verEl && j.currentVersion) verEl.textContent = '当前版本 ' + j.currentVersion;
+          if (verEl) verEl.textContent = '当前版本 ' + WEB_APP_VERSION;
           if (j.htmlUrl) latestReleaseUrl = j.htmlUrl;
           const assets = Array.isArray(j.assets) ? j.assets : [];
           const isZip = (a) => /\.(zip|rar|7z|exe)$/i.test(String(a && a.name || ''));
           const isPatch = (a) => /_patch\.zip$/i.test(String(a && a.name || ''));
           latestFullAsset = assets.find(a => isZip(a) && !isPatch(a)) || null;
           latestPatchAsset = assets.find(a => isPatch(a)) || null;
+          const latestTag = String(j.latestTag || '');
+          const hasNew = !!latestTag && cmpVer(latestTag, WEB_APP_VERSION) > 0;
+          const ahead = !!latestTag && cmpVer(WEB_APP_VERSION, latestTag) > 0;
           if (!j.latestTag) {
             setUpdStatus('仓库暂无已发布版本', '');
-          } else if (j.hasUpdate) {
+          } else if (hasNew) {
             setUpdStatus(`发现新版本 ${j.latestTag}！`, 'has-new');
             if (notesEl && j.body) {
               notesEl.textContent = j.body;
@@ -4115,7 +4129,7 @@
               btnDlPatch.title = (latestPatchAsset.name || '') + ' · 需已安装上一版本，跨版本请用完整包';
               btnDlPatch.style.display = '';
             }
-          } else if (j.isAhead) {
+          } else if (ahead) {
             setUpdStatus(`当前版本领先于 GitHub (${j.latestTag})`, '');
           } else {
             setUpdStatus(`已是最新版本 (${j.latestTag})`, '');

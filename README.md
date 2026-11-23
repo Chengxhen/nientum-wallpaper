@@ -1,5 +1,7 @@
 # Nientum Wallpaper 交互桌面
 
+English: [README.en.md](README.en.md)
+
 《Nientum - Op.ZERO》主题的 Wallpaper Engine 网页壁纸：CG 画廊 + 剧场式音乐播放器 + 网易云在线音乐，配合本地桥接器实现滚轮切换、快捷抽屉和桌面图标联动。
 
 本仓库只包含代码。游戏 CG、立绘、音乐、Spine 素材均不包含（`assets/`、`音乐/` 需自备）；游戏内容版权归 QueseraGames 所有。

@@ -4057,13 +4057,15 @@
       const btnCheck = $('btn-check-update');
       const btnOpen = $('btn-open-release');
       const btnDl = $('btn-download-update');
+      const btnDlPatch = $('btn-download-patch');
       const statusEl = $('sp-update-status');
       const notesEl = $('sp-update-notes');
       const verEl = $('sp-update-ver');
       if (!btnCheck || !statusEl) return;
 
       let latestReleaseUrl = 'https://github.com/Chengxhen/nientum-wallpaper/releases';
-      let latestAsset = null;
+      let latestFullAsset = null;
+      let latestPatchAsset = null;
       let dlPollTimer = 0;
 
       const setUpdStatus = (msg, cls) => {
@@ -4080,6 +4082,7 @@
         setUpdStatus('正在连接 GitHub 检测更新...', '');
         if (notesEl) { notesEl.textContent = ''; notesEl.classList.remove('show'); }
         if (btnDl) btnDl.style.display = 'none';
+        if (btnDlPatch) btnDlPatch.style.display = 'none';
         try {
           const resp = await fetch(`${NCM_BASE}/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
           const j = await resp.json();
@@ -4090,7 +4093,10 @@
           if (verEl && j.currentVersion) verEl.textContent = '当前版本 ' + j.currentVersion;
           if (j.htmlUrl) latestReleaseUrl = j.htmlUrl;
           const assets = Array.isArray(j.assets) ? j.assets : [];
-          latestAsset = assets.find(a => /\.(zip|rar|7z|exe)$/i.test(String(a && a.name || ''))) || assets[0] || null;
+          const isZip = (a) => /\.(zip|rar|7z|exe)$/i.test(String(a && a.name || ''));
+          const isPatch = (a) => /_patch\.zip$/i.test(String(a && a.name || ''));
+          latestFullAsset = assets.find(a => isZip(a) && !isPatch(a)) || null;
+          latestPatchAsset = assets.find(a => isPatch(a)) || null;
           if (!j.latestTag) {
             setUpdStatus('仓库暂无已发布版本', '');
           } else if (j.hasUpdate) {
@@ -4099,9 +4105,15 @@
               notesEl.textContent = j.body;
               notesEl.classList.add('show');
             }
-            if (btnDl && latestAsset && latestAsset.downloadUrl) {
-              btnDl.textContent = `⬇ 下载 ${latestAsset.name || j.latestTag}`;
+            if (btnDl && latestFullAsset && latestFullAsset.downloadUrl) {
+              btnDl.textContent = '⬇ 完整包';
+              btnDl.title = latestFullAsset.name || '';
               btnDl.style.display = '';
+            }
+            if (btnDlPatch && latestPatchAsset && latestPatchAsset.downloadUrl) {
+              btnDlPatch.textContent = '⬆ 增量包（只含变化）';
+              btnDlPatch.title = (latestPatchAsset.name || '') + ' · 需已安装上一版本，跨版本请用完整包';
+              btnDlPatch.style.display = '';
             }
           } else if (j.isAhead) {
             setUpdStatus(`当前版本领先于 GitHub (${j.latestTag})`, '');
@@ -4129,48 +4141,49 @@
         };
       }
 
-      if (btnDl) {
-        btnDl.onclick = async () => {
-          if (!latestAsset || !latestAsset.downloadUrl) return;
-          btnDl.disabled = true;
-          setUpdStatus('正在启动下载...', '');
-          try {
-            const resp = await fetch(`${NCM_BASE}/api/update/download`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ downloadUrl: latestAsset.downloadUrl, fileName: latestAsset.name || '' })
-            });
-            const j = await resp.json();
-            if (!j || !j.ok) {
-              setUpdStatus((j && j.error) || '下载启动失败', 'err');
-              btnDl.disabled = false;
-              return;
-            }
-            stopDlPoll();
-            dlPollTimer = setInterval(async () => {
-              try {
-                const pr = await fetch(`${NCM_BASE}/api/update/progress?t=${Date.now()}`, { cache: 'no-store' });
-                const pj = await pr.json();
-                if (!pj) return;
-                if (pj.error) {
-                  stopDlPoll();
-                  setUpdStatus(pj.message || pj.error, 'err');
-                  btnDl.disabled = false;
-                  return;
-                }
-                if (pj.message) setUpdStatus(pj.message, pj.active ? '' : 'has-new');
-                if (!pj.active) {
-                  stopDlPoll();
-                  btnDl.disabled = false;
-                }
-              } catch (_) {}
-            }, 500);
-          } catch (_) {
-            setUpdStatus('下载请求失败', 'err');
-            btnDl.disabled = false;
+      const startDownload = async (asset, btn) => {
+        if (!asset || !asset.downloadUrl) return;
+        btn.disabled = true;
+        setUpdStatus('正在启动下载...', '');
+        try {
+          const resp = await fetch(`${NCM_BASE}/api/update/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ downloadUrl: asset.downloadUrl, fileName: asset.name || '' })
+          });
+          const j = await resp.json();
+          if (!j || !j.ok) {
+            setUpdStatus((j && j.error) || '下载启动失败', 'err');
+            btn.disabled = false;
+            return;
           }
-        };
-      }
+          stopDlPoll();
+          dlPollTimer = setInterval(async () => {
+            try {
+              const pr = await fetch(`${NCM_BASE}/api/update/progress?t=${Date.now()}`, { cache: 'no-store' });
+              const pj = await pr.json();
+              if (!pj) return;
+              if (pj.error) {
+                stopDlPoll();
+                setUpdStatus(pj.message || pj.error, 'err');
+                btn.disabled = false;
+                return;
+              }
+              if (pj.message) setUpdStatus(pj.message, pj.active ? '' : 'has-new');
+              if (!pj.active) {
+                stopDlPoll();
+                btn.disabled = false;
+              }
+            } catch (_) {}
+          }, 500);
+        } catch (_) {
+          setUpdStatus('下载请求失败', 'err');
+          btn.disabled = false;
+        }
+      };
+
+      if (btnDl) btnDl.onclick = () => startDownload(latestFullAsset, btnDl);
+      if (btnDlPatch) btnDlPatch.onclick = () => startDownload(latestPatchAsset, btnDlPatch);
     })();
 
     if ($('btn-reset-settings')) {

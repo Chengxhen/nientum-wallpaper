@@ -78,6 +78,8 @@ csc.exe -platform:x64 -target:winexe -out:NientumBridge.exe ^
 
 Release 提供 `NientumWallpaper_20261123_rev2_no-login.zip`：网页工程 + `NientumBridge.exe`（20261123.8）+ ffmpeg + 游戏 CG 素材。不含网易云登录、个人导入、缓存与音乐；解压后运行 `一键安装壁纸.bat`。rev2 新增应用内更新检查/下载、抽屉 URL 快捷格和自由配色。
 
+已安装上一版的用户可改下 `NientumWallpaper_20261123_rev2_patch.zip`（37 MB），只含变化的网页文件、桥接器和安装器，放进安装目录双击 `应用增量补丁.bat`。应用后壁纸更新面板会同时提供“完整包 / 增量包”两个按钮。
+
 ## 版权与下架声明
 
 本项目为非官方玩家工具，与《Nientum - Op.ZERO》的开发商、发行商无隶属关系。游戏及其 CG、立绘、音乐、字体、剧本等素材版权归 QueseraGames 所有；发布包中的素材仅限个人学习交流，禁止商用、二次售卖或冒充官方。如权利人认为侵权，请通过本仓库 Issue 联系，核实后立即下架相关源码与发布物。

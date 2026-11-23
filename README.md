@@ -74,7 +74,7 @@ csc.exe -platform:x64 -target:winexe -out:NientumBridge.exe ^
 
 ## 发布包
 
-Release 提供 `NientumWallpaper_20261123_无登录.zip`：网页工程 + `NientumBridge.exe` + ffmpeg + 游戏 CG 素材。不含网易云登录、个人导入、缓存与音乐；解压后运行 `一键安装壁纸.bat`。
+Release 提供 `NientumWallpaper_20261123_no-login.zip`：网页工程 + `NientumBridge.exe` + ffmpeg + 游戏 CG 素材。不含网易云登录、个人导入、缓存与音乐；解压后运行 `一键安装壁纸.bat`。
 
 ## 版权与下架声明
 

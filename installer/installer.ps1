@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet('install', 'music', 'uninstall')]
+  [ValidateSet('install', 'music', 'uninstall', 'start')]
   [string]$Mode = 'install'
 )
 
@@ -183,7 +183,7 @@ function Copy-CleanPackage([string]$srcRoot, [string]$dstRoot) {
   }
 
   # 复制引导脚本与说明
-  foreach ($f in @('一键安装壁纸.bat', '接入本地音乐.bat', '卸载与清理.bat', '使用说明.txt')) {
+  foreach ($f in @('一键安装壁纸.bat', '启动壁纸与服务.bat', '接入本地音乐.bat', '卸载与清理.bat', '使用说明.txt')) {
     $sf = Join-Path $srcRoot $f
     if (Test-Path $sf) { Copy-Item $sf (Join-Path $dstRoot $f) -Force }
   }
@@ -285,20 +285,104 @@ function Set-SteamLaunchOption([string]$bridgeExe, [string]$cmdStr) {
   return $written
 }
 
+function Test-NientumBridgeAutostart {
+  $taskEnabled = $false
+  $regEnabled = $false
+  try {
+    $t = Get-ScheduledTask -TaskName 'NientumBridge_Autostart' -ErrorAction SilentlyContinue
+    if ($t -and $t.State -ne 'Disabled') { $taskEnabled = $true }
+  } catch {}
+  try {
+    $v = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -ErrorAction SilentlyContinue).NientumBridge
+    if (-not [string]::IsNullOrWhiteSpace($v)) { $regEnabled = $true }
+  } catch {}
+  $mode = if ($taskEnabled) { '计划任务(0延迟)' } elseif ($regEnabled) { '注册表Run' } else { '未开启' }
+  [pscustomobject]@{ Enabled = ($taskEnabled -or $regEnabled); Task = $taskEnabled; Registry = $regEnabled; Mode = $mode }
+}
+
+function Set-NientumBridgeAutostart([string]$bridgeExe, [bool]$enable) {
+  $taskName = 'NientumBridge_Autostart'
+  if (-not $enable) {
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -ErrorAction SilentlyContinue } catch {}
+    try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumWheelBridge' -ErrorAction SilentlyContinue } catch {}
+    return 'disabled'
+  }
+  try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumWheelBridge' -ErrorAction SilentlyContinue } catch {}
+  try {
+    $act = New-ScheduledTaskAction -Execute $bridgeExe -Argument '--daemon' -WorkingDirectory (Split-Path -Parent $bridgeExe)
+    $trg = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $taskName -Action $act -Trigger $trg -Settings $stg -Force -ErrorAction Stop | Out-Null
+    # 已通过 0 延迟登录计划任务自启时，移除 Run 项避免登录瞬间重复触发
+    try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -ErrorAction SilentlyContinue } catch {}
+    return 'task'
+  } catch {
+    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -Value "`"$bridgeExe`" --daemon"
+    return 'registry'
+  }
+}
+
+function Test-WeAutostart($weInfo) {
+  $svc = $null
+  try { $svc = Get-Service -Name 'Wallpaper Engine Service' -ErrorAction SilentlyContinue } catch {}
+  if ($svc) {
+    return [pscustomobject]@{ Enabled = $true; Detail = '已开启（高优先级系统服务）' }
+  }
+  foreach ($rk in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run')) {
+    try {
+      $props = Get-ItemProperty -Path $rk -ErrorAction SilentlyContinue
+      if ($props) {
+        foreach ($p in $props.PSObject.Properties) {
+          if ($p.Name -match '^Wallpaper' -or ($p.Value -is [string] -and $p.Value -match 'wallpaper(32|64)\.exe')) {
+            return [pscustomobject]@{ Enabled = $true; Detail = '已开启（系统启动项）' }
+          }
+        }
+      }
+    } catch {}
+  }
+  if ($weInfo -and $weInfo.Config -and (Test-Path $weInfo.Config)) {
+    try {
+      $raw = [System.IO.File]::ReadAllText($weInfo.Config, [System.Text.UTF8Encoding]::new($false))
+      if ($raw -match '"autostart"\s*:\s*true') {
+        return [pscustomobject]@{ Enabled = $true; Detail = '已开启（WE 配置）' }
+      }
+    } catch {}
+  }
+  return [pscustomobject]@{ Enabled = $false; Detail = '未开启（建议勾选以实现开机展示壁纸）' }
+}
+
+function Enable-WeAutostart($weInfo) {
+  $st = Test-WeAutostart $weInfo
+  if ($st.Enabled) { return $st.Detail }
+  if ($weInfo -and $weInfo.Exe -and (Test-Path $weInfo.Exe)) {
+    try {
+      Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'WallpaperEngine' -Value "`"$($weInfo.Exe)`" -nobrowse"
+      return '已写入开机自启'
+    } catch {}
+  }
+  return '未能自动写入'
+}
+
 function Apply-WallpaperInWE($weInfo, [string]$projectJson) {
   if (-not $weInfo.Exe -or -not (Test-Path $weInfo.Exe)) { return $false }
   $running = (Get-Process -Name 'wallpaper64','wallpaper32' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
   if (-not $running) {
-    Start-Process -FilePath $weInfo.Exe | Out-Null
-    for ($i = 0; $i -lt 20; $i++) {
+    Start-Process -FilePath $weInfo.Exe -ArgumentList @('-nobrowse') | Out-Null
+    for ($i = 0; $i -lt 24; $i++) {
       Start-Sleep -Milliseconds 500
-      if ((Get-Process -Name 'wallpaper64','wallpaper32' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) {
-        Start-Sleep -Milliseconds 1200
+      $procs = Get-Process -Name 'wallpaper64','wallpaper32' -ErrorAction SilentlyContinue
+      if ($procs) {
+        Start-Sleep -Milliseconds 2000
         break
       }
     }
   }
   Start-Process -FilePath $weInfo.Exe -ArgumentList @('-control', 'openWallpaper', '-file', $projectJson) | Out-Null
+  if (-not $running) {
+    Start-Sleep -Milliseconds 1500
+    Start-Process -FilePath $weInfo.Exe -ArgumentList @('-control', 'openWallpaper', '-file', $projectJson) | Out-Null
+  }
   return $true
 }
 
@@ -348,66 +432,78 @@ function Start-NientumBridge([string]$targetRoot) {
 }
 
 function Show-NientumStatusForm([string]$targetRoot, [bool]$applied) {
+  $weInfoLocal = Find-WallpaperEngine
   $f = New-Object System.Windows.Forms.Form
   $f.Text = "Nientum 安装完成 · 运行状态自检"
-  $f.Size = New-Object System.Drawing.Size(620, 400)
+  $f.Size = New-Object System.Drawing.Size(620, 430)
   $f.StartPosition = 'CenterScreen'
   $f.FormBorderStyle = 'FixedDialog'
   $f.MaximizeBox = $false
   $f.BackColor = [System.Drawing.Color]::FromArgb(248, 245, 240)
   $f.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
-  $f.Controls.Add((Make-TitleBanner "安装完成 · 运行状态" "桥接器、网易云代理与 Wallpaper Engine 三项自检"))
+  $f.Controls.Add((Make-TitleBanner "安装完成 · 运行状态" "桥接器、网易云代理、Wallpaper Engine 与开机自启四项自检"))
 
   $lblBridge = New-Object System.Windows.Forms.Label
-  $lblBridge.Location = New-Object System.Drawing.Point(24, 92)
+  $lblBridge.Location = New-Object System.Drawing.Point(24, 90)
   $lblBridge.Size = New-Object System.Drawing.Size(560, 22)
   $f.Controls.Add($lblBridge)
 
   $lblProxy = New-Object System.Windows.Forms.Label
-  $lblProxy.Location = New-Object System.Drawing.Point(24, 120)
+  $lblProxy.Location = New-Object System.Drawing.Point(24, 118)
   $lblProxy.Size = New-Object System.Drawing.Size(560, 22)
   $f.Controls.Add($lblProxy)
 
   $lblWe = New-Object System.Windows.Forms.Label
-  $lblWe.Location = New-Object System.Drawing.Point(24, 148)
+  $lblWe.Location = New-Object System.Drawing.Point(24, 146)
   $lblWe.Size = New-Object System.Drawing.Size(560, 22)
   $f.Controls.Add($lblWe)
 
+  $lblAuto = New-Object System.Windows.Forms.Label
+  $lblAuto.Location = New-Object System.Drawing.Point(24, 174)
+  $lblAuto.Size = New-Object System.Drawing.Size(560, 22)
+  $f.Controls.Add($lblAuto)
+
   $lblHint = New-Object System.Windows.Forms.Label
-  $lblHint.Location = New-Object System.Drawing.Point(24, 176)
+  $lblHint.Location = New-Object System.Drawing.Point(24, 204)
   $lblHint.Size = New-Object System.Drawing.Size(560, 38)
   $lblHint.ForeColor = [System.Drawing.Color]::FromArgb(95, 86, 76)
   $lblHint.Text = if ($applied) { "壁纸已自动发送到 Wallpaper Engine；如果桌面未变化，请在 WE 中重新应用一次。" } else { "壁纸未自动应用，请到 WE 左下角「打开壁纸」选择安装目录下的 project.json。" }
   $f.Controls.Add($lblHint)
 
   $lblLog = New-Object System.Windows.Forms.Label
-  $lblLog.Location = New-Object System.Drawing.Point(24, 220)
+  $lblLog.Location = New-Object System.Drawing.Point(24, 248)
   $lblLog.Size = New-Object System.Drawing.Size(560, 36)
   $lblLog.ForeColor = [System.Drawing.Color]::FromArgb(120, 90, 60)
   $f.Controls.Add($lblLog)
 
   $btnRecheck = New-Object System.Windows.Forms.Button
   $btnRecheck.Text = "重新检测"
-  $btnRecheck.Location = New-Object System.Drawing.Point(24, 286)
-  $btnRecheck.Size = New-Object System.Drawing.Size(110, 34)
+  $btnRecheck.Location = New-Object System.Drawing.Point(24, 314)
+  $btnRecheck.Size = New-Object System.Drawing.Size(96, 34)
   $f.Controls.Add($btnRecheck)
 
   $btnStart = New-Object System.Windows.Forms.Button
   $btnStart.Text = "启动/重启桥接器"
-  $btnStart.Location = New-Object System.Drawing.Point(144, 286)
-  $btnStart.Size = New-Object System.Drawing.Size(150, 34)
+  $btnStart.Location = New-Object System.Drawing.Point(128, 314)
+  $btnStart.Size = New-Object System.Drawing.Size(140, 34)
   $f.Controls.Add($btnStart)
+
+  $btnToggleAuto = New-Object System.Windows.Forms.Button
+  $btnToggleAuto.Text = "切换桥接自启"
+  $btnToggleAuto.Location = New-Object System.Drawing.Point(276, 314)
+  $btnToggleAuto.Size = New-Object System.Drawing.Size(124, 34)
+  $f.Controls.Add($btnToggleAuto)
 
   $btnLog = New-Object System.Windows.Forms.Button
   $btnLog.Text = "打开日志"
-  $btnLog.Location = New-Object System.Drawing.Point(304, 286)
-  $btnLog.Size = New-Object System.Drawing.Size(110, 34)
+  $btnLog.Location = New-Object System.Drawing.Point(408, 314)
+  $btnLog.Size = New-Object System.Drawing.Size(88, 34)
   $f.Controls.Add($btnLog)
 
   $btnClose = New-Object System.Windows.Forms.Button
   $btnClose.Text = "关闭"
-  $btnClose.Location = New-Object System.Drawing.Point(430, 286)
-  $btnClose.Size = New-Object System.Drawing.Size(154, 34)
+  $btnClose.Location = New-Object System.Drawing.Point(504, 314)
+  $btnClose.Size = New-Object System.Drawing.Size(80, 34)
   $btnClose.FlatStyle = 'Flat'
   $btnClose.BackColor = [System.Drawing.Color]::FromArgb(196, 144, 68)
   $btnClose.ForeColor = [System.Drawing.Color]::White
@@ -419,6 +515,8 @@ function Show-NientumStatusForm([string]$targetRoot, [bool]$applied) {
 
   $update = {
     $st = Test-NientumRuntime $targetRoot
+    $autoBr = Test-NientumBridgeAutostart
+    $autoWe = Test-WeAutostart $weInfoLocal
     $lblBridge.Text = if ($st.Bridge) { "桥接器：运行中" } else { "桥接器：未运行（鼠标滚轮/抽屉/桌面联动会失效）" }
     $lblBridge.ForeColor = if ($st.Bridge) { $green } else { $red }
     if ($st.Proxy) {
@@ -434,6 +532,9 @@ function Show-NientumStatusForm([string]$targetRoot, [bool]$applied) {
     }
     $lblWe.Text = if ($st.WE) { "Wallpaper Engine：运行中" } else { "Wallpaper Engine：未运行" }
     $lblWe.ForeColor = if ($st.WE) { $green } else { $amber }
+    $lblAuto.Text = "开机自启：桥接器 [$($autoBr.Mode)] · WE [$($autoWe.Detail)]"
+    $lblAuto.ForeColor = if ($autoBr.Enabled -and $autoWe.Enabled) { $green } elseif ($autoBr.Enabled -or $autoWe.Enabled) { $amber } else { $red }
+    $btnToggleAuto.Text = if ($autoBr.Enabled) { "关闭桥接自启" } else { "开启桥接自启" }
     if (Test-Path $st.LogPath) {
       $lblLog.Text = "桥接日志：" + $st.LogPath
     } elseif (Test-Path $st.ProxyLogPath) {
@@ -450,6 +551,12 @@ function Show-NientumStatusForm([string]$targetRoot, [bool]$applied) {
     Start-Sleep -Milliseconds 1500
     & $update
     $btnStart.Enabled = $true
+  })
+  $btnToggleAuto.Add_Click({
+    $cur = Test-NientumBridgeAutostart
+    $bridgeExe = Join-Path $targetRoot 'Nientum_Bridge\NientumBridge.exe'
+    Set-NientumBridgeAutostart $bridgeExe (-not $cur.Enabled) | Out-Null
+    & $update
   })
   $btnLog.Add_Click({
     $st = Test-NientumRuntime $targetRoot
@@ -489,10 +596,38 @@ function Make-TitleBanner([string]$titleText, [string]$subText) {
   return $panel
 }
 
+# ================= 快速启动模式 =================
+if ($Mode -eq 'start') {
+  $projectJson = Join-Path $PackRoot 'Nientum_Wallpaper\project.json'
+  if (-not (Test-Path $projectJson)) {
+    [System.Windows.Forms.MessageBox]::Show("未找到 Nientum_Wallpaper\project.json，请确认在安装目录运行。", "无法启动", 'OK', 'Error') | Out-Null
+    exit 1
+  }
+  Stop-NientumProcesses
+  Start-NientumBridge $PackRoot | Out-Null
+  $weInfo = Find-WallpaperEngine
+  $applied = $false
+  if ($weInfo.Exe) {
+    $applied = Apply-WallpaperInWE $weInfo $projectJson
+  }
+  for ($i = 0; $i -lt 20; $i++) {
+    $st = Test-NientumRuntime $PackRoot
+    if ($st.Bridge -and $st.Proxy) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  $stFinal = Test-NientumRuntime $PackRoot
+  if ($stFinal.Bridge -and $stFinal.Proxy -and $stFinal.WE) {
+    [System.Windows.Forms.MessageBox]::Show("Nientum 桥接服务、网易云代理与 Wallpaper Engine 已全部就绪！", "启动成功", 'OK', 'Information') | Out-Null
+  } else {
+    Show-NientumStatusForm $PackRoot $applied
+  }
+  exit 0
+}
+
 # ================= 卸载模式 =================
 if ($Mode -eq 'uninstall') {
   $ans = [System.Windows.Forms.MessageBox]::Show(
-    "将执行以下清理操作：`r`n1. 停止后台滚轮桥接器与网易云本地代理`r`n2. 移除 Windows 开机自启联动项`r`n3. 安全断开挂载的本地音乐联接（不会删除您的原始音乐文件）`r`n`r`n确认继续吗？",
+    "将执行以下清理操作：`r`n1. 停止后台滚轮桥接器与网易云本地代理`r`n2. 移除 Windows 开机自启计划任务与注册表联动项`r`n3. 安全断开挂载的本地音乐联接（不会删除您的原始音乐文件）`r`n`r`n确认继续吗？",
     "Nientum 壁纸 - 卸载与清理",
     [System.Windows.Forms.MessageBoxButtons]::YesNo,
     [System.Windows.Forms.MessageBoxIcon]::Question
@@ -500,8 +635,7 @@ if ($Mode -eq 'uninstall') {
   if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { exit 0 }
 
   Stop-NientumProcesses
-  try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumWheelBridge' -ErrorAction SilentlyContinue } catch {}
-  try { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -ErrorAction SilentlyContinue } catch {}
+  Set-NientumBridgeAutostart '' $false | Out-Null
   Remove-JunctionSafe (Join-Path $PackRoot 'Nientum_Wallpaper\音乐')
 
   [System.Windows.Forms.MessageBox]::Show(
@@ -602,29 +736,45 @@ if ($Mode -eq 'music') {
 
 # ================= 一键图形安装模式 =================
 $weInfo = Find-WallpaperEngine
+$weAutoInfo = Test-WeAutostart $weInfo
 $isCleanHere = Test-CleanAsciiPath $PackRoot
 $packOnC = ($PackRoot -match '^[cC]:')
 $defaultTarget = if ($isCleanHere -and -not $packOnC) { $PackRoot } else { Get-RecommendedInstallRoot }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Nientum - CG与音乐剧场壁纸 一键安装"
-$form.Size = New-Object System.Drawing.Size(620, 500)
+$form.Size = New-Object System.Drawing.Size(620, 535)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.BackColor = [System.Drawing.Color]::FromArgb(248, 245, 240)
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
-$form.Controls.Add((Make-TitleBanner "《Nientum》桌面剧场壁纸 · 一键安装并启动" "自动配置英文路径、Wallpaper Engine 导入与网易云/鼠标桥接联动"))
+$form.Controls.Add((Make-TitleBanner "《Nientum》桌面剧场壁纸 · 一键安装并启动" "自动配置英文路径、开机极速联动、WE 导入与网易云/鼠标桥接"))
 
 $lblQuick = New-Object System.Windows.Forms.Label
-$lblQuick.Text = "默认安装到 $defaultTarget。`r`n自动检测 Wallpaper Engine，安装完成后同时启动桥接器、网易云代理并应用壁纸，无需其他操作。"
-$lblQuick.Location = New-Object System.Drawing.Point(22, 92)
-$lblQuick.Size = New-Object System.Drawing.Size(566, 48)
+$lblQuick.Text = "默认安装到 $defaultTarget。`r`n自动配置开机 0 延迟联动并启动桥接器、网易云代理与壁纸，无需其他操作。"
+$lblQuick.Location = New-Object System.Drawing.Point(22, 88)
+$lblQuick.Size = New-Object System.Drawing.Size(566, 44)
 $lblQuick.ForeColor = [System.Drawing.Color]::FromArgb(70, 62, 52)
 $form.Controls.Add($lblQuick)
 
+$chkAutoBridge = New-Object System.Windows.Forms.CheckBox
+$chkAutoBridge.Text = "开机自动启动 Nientum 桥接服务（0 延迟登录计划任务，随 WE 自动唤醒/休眠）"
+$chkAutoBridge.Location = New-Object System.Drawing.Point(24, 142)
+$chkAutoBridge.Size = New-Object System.Drawing.Size(564, 24)
+$chkAutoBridge.Checked = $true
+$form.Controls.Add($chkAutoBridge)
+
+$chkAutoWe = New-Object System.Windows.Forms.CheckBox
+$chkAutoWe.Text = "确保 Wallpaper Engine 开机自启（当前：$($weAutoInfo.Detail)）"
+$chkAutoWe.Location = New-Object System.Drawing.Point(24, 170)
+$chkAutoWe.Size = New-Object System.Drawing.Size(564, 24)
+$chkAutoWe.Checked = $true
+$chkAutoWe.Enabled = [bool]$weInfo.Exe
+$form.Controls.Add($chkAutoWe)
+
 $lblFlow = New-Object System.Windows.Forms.Label
-$lblFlow.Text = "自动流程：`r`n① 复制纯净壁纸与组件   ② 写入桥接配置   ③ 启动桥接器并拉起网易云代理`r`n④ 启动 WE 并应用壁纸   ⑤ 三项运行状态自检"
+$lblFlow.Text = "自动流程：`r`n① 复制纯净壁纸与组件   ② 写入配置与开机极速联动   ③ 启动桥接器与网易云代理`r`n④ 稳健拉起 WE 并应用壁纸   ⑤ 四项运行状态自检"
 $lblFlow.Location = New-Object System.Drawing.Point(22, 290)
 $lblFlow.Size = New-Object System.Drawing.Size(566, 62)
 $lblFlow.ForeColor = [System.Drawing.Color]::FromArgb(110, 94, 76)
@@ -662,27 +812,20 @@ $btnDir.Add_Click({
 $form.Controls.Add($btnDir)
 $y += 42
 
-# 2. 联动模式
+# 2. Steam 叠加联动
 $lblMode = New-Object System.Windows.Forms.Label
-$lblMode.Text = "2. 桥接器与网易云服务联动方式（解决桌面滚轮、左键与网易云在线播放）："
+$lblMode.Text = "2. 额外叠加：Steam 启动项联动（仅在不开启开机自启、纯靠 Steam 手动启动 WE 时需要）："
 $lblMode.Location = New-Object System.Drawing.Point(22, $y)
 $lblMode.AutoSize = $true
 $form.Controls.Add($lblMode)
 $y += 24
 
-$rbDaemon = New-Object System.Windows.Forms.RadioButton
-$rbDaemon.Text = "全自动轻守护联动（推荐：零手工配置，随 WE 自动唤醒，关闭 WE 即停）"
-$rbDaemon.Location = New-Object System.Drawing.Point(26, $y)
-$rbDaemon.AutoSize = $true
-$rbDaemon.Checked = $true
-$form.Controls.Add($rbDaemon)
-$y += 24
-
-$rbSteam = New-Object System.Windows.Forms.RadioButton
-$rbSteam.Text = "Steam 启动项联动（自动尝试写入 Steam 配置 + 剪贴板兜底，零开机后台）"
-$rbSteam.Location = New-Object System.Drawing.Point(26, $y)
-$rbSteam.AutoSize = $true
-$form.Controls.Add($rbSteam)
+$chkSteamLaunch = New-Object System.Windows.Forms.CheckBox
+$chkSteamLaunch.Text = "同时写入 Steam Wallpaper Engine 启动参数（不影响上方的开机自启设置）"
+$chkSteamLaunch.Location = New-Object System.Drawing.Point(26, $y)
+$chkSteamLaunch.AutoSize = $true
+$chkSteamLaunch.Checked = $false
+$form.Controls.Add($chkSteamLaunch)
 $y += 32
 
 # 3. Wallpaper Engine 检测与应用
@@ -752,18 +895,20 @@ $btnInstall.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10.5, [S
 $btnInstall.FlatStyle = 'Flat'
 
 $chkAdvanced = New-Object System.Windows.Forms.CheckBox
-$chkAdvanced.Text = "高级选项（安装位置 / 联动方式 / 本地音乐）"
-$chkAdvanced.Location = New-Object System.Drawing.Point(22, 430)
+$chkAdvanced.Text = "高级选项（安装位置 / Steam 叠加 / 本地音乐）"
+$chkAdvanced.Location = New-Object System.Drawing.Point(22, 464)
 $chkAdvanced.AutoSize = $true
 $form.Controls.Add($chkAdvanced)
 
 $toggleAdv = {
   $adv = $chkAdvanced.Checked
-  foreach ($c in @($lblDir, $txtDir, $btnDir, $lblMode, $rbDaemon, $rbSteam, $lblMus, $txtMus, $btnMus, $chkMusCopy)) {
+  foreach ($c in @($lblDir, $txtDir, $btnDir, $lblMode, $chkSteamLaunch, $lblMus, $txtMus, $btnMus, $chkMusCopy)) {
     if ($c) { $c.Visible = $adv }
   }
-  $lblQuick.Text = "安装到 $($txtDir.Text)。`r`n自动检测 Wallpaper Engine，安装完成后同时启动桥接器、网易云代理并应用壁纸，无需其他操作。"
+  $lblQuick.Text = "安装到 $($txtDir.Text)。`r`n自动配置开机 0 延迟联动并启动桥接器、网易云代理与壁纸，无需其他操作。"
   $lblQuick.Visible = -not $adv
+  $chkAutoBridge.Visible = -not $adv
+  $chkAutoWe.Visible = -not $adv
   $lblFlow.Visible = -not $adv
 }
 $chkAdvanced.Add_CheckedChanged({ & $toggleAdv })
@@ -820,14 +965,13 @@ $btnInstall.Add_Click({
     if ($prep -and $prep.ExitCode -ne 0) {
       throw "内置代理内核解压失败，请查看 $targetRoot\Nientum_Bridge\_prepare.log"
     }
-    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumWheelBridge' -ErrorAction SilentlyContinue
-    if ($rbDaemon.Checked) {
-      $lblStatus.Text = "正在注册 WE 自动联动并启动桥接器 + 网易云代理..."
-      [System.Windows.Forms.Application]::DoEvents()
-      Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -Value "`"$bridgeExe`" --daemon"
-      Start-Process -FilePath $bridgeExe -ArgumentList @('--daemon', '--replace') | Out-Null
-    } else {
-      Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'NientumBridge' -ErrorAction SilentlyContinue
+    $lblStatus.Text = "正在配置开机联动并启动桥接器 + 网易云代理..."
+    [System.Windows.Forms.Application]::DoEvents()
+    Set-NientumBridgeAutostart $bridgeExe $chkAutoBridge.Checked | Out-Null
+    if ($chkAutoWe.Checked -and $weInfo.Exe) {
+      Enable-WeAutostart $weInfo | Out-Null
+    }
+    if ($chkSteamLaunch.Checked) {
       $cmdStr = "cmd /c `"start `"`" `"$bridgeExe`" --from-we & %command%`""
       try { [System.Windows.Forms.Clipboard]::SetText($cmdStr) } catch {}
       $vdfCount = Set-SteamLaunchOption $bridgeExe $cmdStr
@@ -836,8 +980,8 @@ $btnInstall.Add_Click({
       } else {
         $steamHint = "【Steam 启动项已复制到剪贴板】`r`n未检测到已安装的 Wallpaper Engine Steam 配置文件，请打开 Steam -> 右键「Wallpaper Engine」->「属性」->「通用」-> 在「启动选项」中按 Ctrl+V 粘贴后关闭即可。"
       }
-      Start-Process -FilePath $bridgeExe -ArgumentList @('--daemon', '--replace') | Out-Null
     }
+    Start-Process -FilePath $bridgeExe -ArgumentList @('--daemon', '--replace') | Out-Null
 
     $applied = $false
     if ($chkApplyWe.Checked -and $weInfo.Exe) {

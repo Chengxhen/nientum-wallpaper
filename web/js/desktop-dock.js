@@ -403,6 +403,34 @@
     ensureDockAnim(syncSel);
   }
 
+  let slotSyncRetryTimer = 0;
+  let slotSyncRetryCount = 0;
+
+  async function syncSlotsFromServer() {
+    try {
+      const res = await apiGet('/api/fs/slots');
+      if (res && res.ok && Array.isArray(res.slots) && res.slots.length) {
+        slots = res.slots;
+        try { localStorage.setItem(LOCAL_SLOTS_KEY, JSON.stringify(slots)); } catch (_) {}
+        selectedIndex = Math.floor(Math.max(0, totalItemCount() - 1) / 2);
+        renderTickets();
+      }
+      slotSyncRetryCount = 0;
+      if (slotSyncRetryTimer) { clearTimeout(slotSyncRetryTimer); slotSyncRetryTimer = 0; }
+      return true;
+    } catch (_) {
+      if (slotSyncRetryCount < 18) {
+        slotSyncRetryCount++;
+        if (slotSyncRetryTimer) clearTimeout(slotSyncRetryTimer);
+        slotSyncRetryTimer = setTimeout(() => {
+          slotSyncRetryTimer = 0;
+          syncSlotsFromServer();
+        }, 1600);
+      }
+      return false;
+    }
+  }
+
   async function loadSlots() {
     try {
       const localRaw = localStorage.getItem(LOCAL_SLOTS_KEY);
@@ -413,15 +441,7 @@
     } catch (_) {}
     selectedIndex = Math.floor(Math.max(0, totalItemCount() - 1) / 2);
     renderTickets();
-    try {
-      const res = await apiGet('/api/fs/slots');
-      if (res && res.ok && Array.isArray(res.slots) && res.slots.length) {
-        slots = res.slots;
-        try { localStorage.setItem(LOCAL_SLOTS_KEY, JSON.stringify(slots)); } catch (_) {}
-        selectedIndex = Math.floor(Math.max(0, totalItemCount() - 1) / 2);
-        renderTickets();
-      }
-    } catch (_) {}
+    await syncSlotsFromServer();
   }
 
   async function saveSlots() {
@@ -544,6 +564,14 @@
       if ($('btn-dock-up')) $('btn-dock-up').disabled = !drawerParent;
       renderDrawerItems();
     } catch (_) {
+      if (performance.now() < 35000 && dr.classList.contains('open')) {
+        if ($('dock-drawer-path')) $('dock-drawer-path').textContent = '正在等待本地桥接服务就绪…';
+        itemsEl.innerHTML = '<div class="dock-empty">本地服务启动中，正在自动连接…</div>';
+        setTimeout(() => {
+          if (dr.classList.contains('open')) loadDrawerDir(targetPath, titleHint);
+        }, 1500);
+        return;
+      }
       if ($('dock-drawer-path')) $('dock-drawer-path').textContent = '127.0.0.1:17988 未连接';
       itemsEl.innerHTML = '<div class="dock-empty">未连接本地桌面服务，请重启 NientumBridge / 壁纸</div>';
     }
@@ -736,7 +764,7 @@
             <div class="dock-ticket-path">${escapeHtml(slot.path)}</div>
           </div>
           <div class="dock-ticket-bottom">
-            <span class="dock-ticket-hint">${isUrl ? '长按拖动 · 双击 Edge 打开' : '长按拖动 · 双击打开'}</span>
+            <span class="dock-ticket-hint">${isUrl ? '双击 Edge 打开' : '长按拖动 · 双击打开'}</span>
             <div class="dock-ticket-actions">
               <button type="button" class="dock-mini-btn rebind" title="${isUrl ? '修改网站网址' : '选择定位文件夹'}">${isUrl ? '🌐' : '📁'}</button>
               <button type="button" class="dock-mini-btn icon" title="更换封票图案">🎨</button>

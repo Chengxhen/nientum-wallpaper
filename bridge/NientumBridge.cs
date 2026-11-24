@@ -145,6 +145,47 @@ static class Native
         UIntPtr nSize, out IntPtr lpNumberOfBytesRead);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);
+    public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    public const int JobObjectExtendedLimitInformation = 9;
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(IntPtr hJob, int infoType, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION lpJobObjectInfo, uint cbJobObjectInfoLength);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", SetLastError = true)]
@@ -665,7 +706,7 @@ sealed class ProxyRuntimePaths
 // 首次安装/启动解压到 <exe目录>\runtime\proxy-<版本>，之后只校验 .ready，不再解压。
 static class PayloadRuntime
 {
-    public const string Version = "20261123.8";
+    public const string Version = "20261124.3";
     const string ResNode = "payload.node.gz";
     const string ResServer = "payload.server.js.gz";
     const string ResRecord = "payload.we_record_window.ps1";
@@ -961,7 +1002,10 @@ sealed class Bridge
     readonly object neteaseLock = new object();
     const int NET_PORT = 17988;
     const int CTRL_PORT = 17989;
-    const int EXPECTED_NETEASE_VER = 4;
+    const int EXPECTED_NETEASE_VER = 6;
+    readonly DateTime bridgeStartUtc = DateTime.UtcNow;
+    IntPtr childJobHandle = IntPtr.Zero;
+    bool daemonIdleLogged = false;
     bool currentIsNientum = false;
     DateTime lastConfigCheck = DateTime.MinValue;
 
@@ -1009,6 +1053,7 @@ sealed class Bridge
             Log("proxy runtime prepare error: " + ex.Message);
         }
         hookProc = HookCallback;
+        InitChildJobObject();
         AppDomain.CurrentDomain.ProcessExit += (s2, e2) => { StopControlServer(); StopNeteaseServer(); };
         StartControlServer();
 
@@ -1111,6 +1156,7 @@ sealed class Bridge
         RefreshNientum();
         if (running)
         {
+            daemonIdleLogged = false;
             if (!weRunning) { weRunning = true; Log("wallpaper engine started"); }
             weMissingCount = 0;
             if (currentIsNientum)
@@ -1132,6 +1178,15 @@ sealed class Bridge
                 cachedWallpaperHwnd = IntPtr.Zero;
                 StopNeteaseServer();
                 Log("wallpaper engine stopped");
+            }
+            else if (daemonMode && (neteaseProc != null || neteaseWasRunning) && (DateTime.UtcNow - bridgeStartUtc).TotalSeconds >= 18)
+            {
+                StopNeteaseServer();
+                if (!daemonIdleLogged)
+                {
+                    daemonIdleLogged = true;
+                    Log("daemon idle (WE not running); proxy hibernated");
+                }
             }
             weMissingCount++;
             if (!daemonMode && weMissingCount >= 2)
@@ -1654,6 +1709,7 @@ sealed class Bridge
                 psi.EnvironmentVariables["NIENTUM_IPV4"] = "1";
                 Process proc = Process.Start(psi);
                 if (proc == null) throw new Exception("Process.Start returned null");
+                AttachChildToJob(proc);
                 neteaseProc = proc;
                 neteaseWasRunning = true;
                 neteaseReady = false;
@@ -1719,6 +1775,34 @@ sealed class Bridge
     {
         if (noNetease) return;
         EnsureNeteaseServer();
+    }
+
+    void InitChildJobObject()
+    {
+        try
+        {
+            IntPtr job = Native.CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) return;
+            var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            uint len = (uint)Marshal.SizeOf(typeof(Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            if (Native.SetInformationJobObject(job, Native.JobObjectExtendedLimitInformation, ref info, len))
+            {
+                childJobHandle = job;
+            }
+            else
+            {
+                Native.CloseHandle(job);
+            }
+        }
+        catch (Exception ex) { Log("job object init skipped: " + ex.Message); }
+    }
+
+    void AttachChildToJob(Process proc)
+    {
+        if (childJobHandle == IntPtr.Zero || proc == null) return;
+        try { Native.AssignProcessToJobObject(childJobHandle, proc.Handle); }
+        catch { }
     }
 
     void InstallHook()

@@ -10,8 +10,8 @@ const api = require('@neteasecloudmusicapienhanced/api');
 
 const PORT = Number(process.env.NIENTUM_PROXY_PORT) || 17988;
 const HOST = '127.0.0.1';
-const BRIDGE_VER = 4;
-const APP_VERSION = 'v2026.11.23.1';
+const BRIDGE_VER = 6;
+const APP_VERSION = 'v2026.11.24.1';
 const GITHUB_REPO = 'Chengxhen/nientum-wallpaper';
 const BRIDGE_CTRL_PORT = 17989;
 // 代码目录（解压出来的 runtime\proxy-*）与用户数据目录分离：
@@ -27,6 +27,8 @@ const IMPORTED_THUMB_DIR = path.join(DATA_DIR, 'imported-thumbs');
 const IMPORTED_MEDIA_DIR = path.join(DATA_DIR, 'imported-media');
 const UI_STATE_FILE = path.join(DATA_DIR, 'ui-state.txt');
 const AUDIO_CACHE_DIR = path.join(DATA_DIR, 'audio-cache');
+const NCM_DOWNLOADS_DIR = path.join(DATA_DIR, 'ncm-downloads');
+const NCM_DOWNLOADS_FILE = path.join(DATA_DIR, 'ncm-downloads.json');
 const AUDIO_CACHE_MAX_BYTES = Math.max(128, Number(process.env.NIENTUM_AUDIO_CACHE_MB) || 1024) * 1024 * 1024;
 // 网易云 CDN 复用长连接，避免每首歌/每次拖动进度都重新 TLS 握手；
 // 默认只走 IPv4（国内网络 IPv6 回程不稳时最容易表现为播放中途卡住）。
@@ -1290,6 +1292,7 @@ async function resolveSongUrl(id, level, forceRefresh = false) {
         br: d.br || (QUALITY_LEVELS[lv] ? QUALITY_LEVELS[lv].br : 0),
         type: d.type || (QUALITY_LEVELS[lv] ? QUALITY_LEVELS[lv].type : 'flac'),
         size: d.size || 0,
+        freeTrialInfo: d.freeTrialInfo || null,
         requested: level,
         expiresAt: Date.now() + 3 * 60 * 1000
       };
@@ -1386,6 +1389,136 @@ function serveAudioCache(req, res, entry) {
   fs.createReadStream(entry.file).pipe(res);
   return true;
 }
+
+// ===== 网易云下载歌曲持久化（独立于临时 audio-cache，不自动清理） =====
+let ncmDownloads = [];
+const ncmDownloadsById = new Map();
+
+function ensureNcmDownloadsDirSafe() {
+  try { fs.mkdirSync(NCM_DOWNLOADS_DIR, { recursive: true }); } catch (_) {}
+}
+
+function ncmDownloadAudioPath(fileName) {
+  return path.join(NCM_DOWNLOADS_DIR, path.basename(String(fileName || '')));
+}
+
+function saveNcmDownloads() {
+  try {
+    ensureNcmDownloadsDirSafe();
+    const tmp = NCM_DOWNLOADS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(ncmDownloads, null, 2), 'utf8');
+    fs.renameSync(tmp, NCM_DOWNLOADS_FILE);
+  } catch (e) {
+    console.warn('[Nientum NeteaseBridge] saveNcmDownloads error:', e && e.message);
+  }
+}
+
+function loadNcmDownloads() {
+  ncmDownloads = [];
+  ncmDownloadsById.clear();
+  try {
+    if (!fs.existsSync(NCM_DOWNLOADS_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(NCM_DOWNLOADS_FILE, 'utf8'));
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) {
+      if (!item || !item.songId || !item.file) continue;
+      const audioFile = ncmDownloadAudioPath(item.file);
+      if (!fs.existsSync(audioFile)) continue;
+      const entry = Object.assign({}, item, { songId: String(item.songId) });
+      ncmDownloads.push(entry);
+      ncmDownloadsById.set(entry.songId, entry);
+    }
+  } catch (_) {}
+}
+
+function publicNcmDownloadItem(entry) {
+  const sid = String(entry.songId);
+  const base = `http://${HOST}:${PORT}`;
+  const coverExists = entry.coverFile && fs.existsSync(ncmDownloadAudioPath(entry.coverFile));
+  const lyricExists = entry.lyricFile && fs.existsSync(ncmDownloadAudioPath(entry.lyricFile));
+  return {
+    id: 'ncm_dl_' + sid,
+    songId: sid,
+    title: entry.title || '未知歌曲',
+    artist: entry.artist || '未知艺术家',
+    album: entry.album || '',
+    duration: Number(entry.duration) || 0,
+    level: entry.level || 'exhigh',
+    type: entry.type || 'mp3',
+    size: Number(entry.size) || 0,
+    downloadedAt: Number(entry.downloadedAt) || 0,
+    hasLyric: !!lyricExists,
+    src: `${base}/api/ncm/downloads/file?id=${encodeURIComponent(sid)}`,
+    cover: coverExists ? `${base}/api/ncm/downloads/cover?id=${encodeURIComponent(sid)}` : '',
+    lyricUrl: lyricExists ? `${base}/api/ncm/downloads/lyric?id=${encodeURIComponent(sid)}` : ''
+  };
+}
+
+function downloadUrlToFile(urlStr, destPath, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('Too many redirects'));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const partPath = destPath + '.part';
+    try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch (_) {}
+    const req = lib.request({
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'GET',
+      agent: isHttps ? keepAliveHttps : keepAliveHttp,
+      family: IPV4_ONLY ? 4 : 0,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://music.163.com/',
+        'Accept': '*/*'
+      }
+    }, (uRes) => {
+      if ([301, 302, 303, 307, 308].includes(uRes.statusCode) && uRes.headers.location) {
+        uRes.resume();
+        const nextUrl = new URL(uRes.headers.location, urlStr).toString();
+        return downloadUrlToFile(nextUrl, destPath, redirects + 1).then(resolve, reject);
+      }
+      if (uRes.statusCode < 200 || uRes.statusCode >= 300) {
+        uRes.resume();
+        return reject(new Error('HTTP ' + uRes.statusCode));
+      }
+      const ws = fs.createWriteStream(partPath);
+      let bytes = 0;
+      uRes.on('data', (chunk) => { bytes += chunk.length; });
+      uRes.pipe(ws);
+      ws.on('finish', () => {
+        ws.close(() => {
+          try {
+            if (bytes <= 0) {
+              try { fs.unlinkSync(partPath); } catch (_) {}
+              return reject(new Error('Empty file'));
+            }
+            fs.renameSync(partPath, destPath);
+            resolve(bytes);
+          } catch (e) {
+            try { fs.unlinkSync(partPath); } catch (_) {}
+            reject(e);
+          }
+        });
+      });
+      const onErr = (err) => {
+        try { ws.destroy(); } catch (_) {}
+        try { fs.unlinkSync(partPath); } catch (_) {}
+        reject(err);
+      };
+      ws.on('error', onErr);
+      uRes.on('error', onErr);
+    });
+    req.setTimeout(30000, () => req.destroy(new Error('Download timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+loadNcmDownloads();
 
 const activeAudioCacheFills = new Set();
 const audioDownloadTasks = new Map();
@@ -2297,6 +2430,162 @@ const server = http.createServer(async (req, res) => {
       }
       lyricCache.set(key, data);
       return sendJson(res, 200, data);
+    }
+
+    if (p === '/api/ncm/downloads') {
+      return sendJson(res, 200, { ok: true, items: ncmDownloads.map(publicNcmDownloadItem) });
+    }
+
+    if (p === '/api/ncm/downloads/save' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const songId = String(body.songId || body.id || '').replace(/[^\d]/g, '');
+      if (!songId) return sendJson(res, 400, { ok: false, error: '缺少歌曲 id' });
+
+      const existing = ncmDownloadsById.get(songId);
+      if (existing && fs.existsSync(ncmDownloadAudioPath(existing.file))) {
+        return sendJson(res, 200, { ok: true, item: publicNcmDownloadItem(existing), alreadyExisted: true });
+      }
+
+      const level = normalizeLevel(body.level);
+      let meta = await resolveSongUrl(songId, level);
+      if (!meta) {
+        await new Promise(r => setTimeout(r, 300));
+        meta = await resolveSongUrl(songId, level, true);
+      }
+      if (!meta || !meta.url) {
+        return sendJson(res, 200, { ok: false, error: '该歌曲暂无可用音源（可能无版权）' });
+      }
+      if (meta.freeTrialInfo && !body.allowTrial) {
+        return sendJson(res, 200, { ok: false, isTrial: true, error: '当前账号仅支持 30 秒试听，已跳过下载' });
+      }
+
+      ensureNcmDownloadsDirSafe();
+      const ext = String(meta.type || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
+      const audioFileName = `ncm_${songId}.${ext}`;
+      const audioDest = ncmDownloadAudioPath(audioFileName);
+
+      try {
+        const cached = readAudioCache(songId, meta.level, meta.size || 0) || readAudioCache(songId, level);
+        if (cached && fs.existsSync(cached.file)) {
+          fs.copyFileSync(cached.file, audioDest);
+        } else {
+          await downloadUrlToFile(meta.url, audioDest);
+        }
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: '音频下载失败: ' + ((e && e.message) || '网络异常') });
+      }
+
+      let size = 0;
+      try { size = fs.statSync(audioDest).size; } catch (_) {}
+
+      let coverFileName = '';
+      const coverUrl = String(body.cover || '').trim();
+      if (/^https?:\/\//i.test(coverUrl)) {
+        const cName = `ncm_${songId}.jpg`;
+        try {
+          await downloadUrlToFile(coverUrl, ncmDownloadAudioPath(cName));
+          coverFileName = cName;
+        } catch (_) {}
+      }
+
+      let lyricFileName = '';
+      try {
+        let lyricData = lyricCache.get(songId);
+        if (!lyricData) {
+          const lRes = await api.lyric({ id: songId, cookie: auth.cookie });
+          const lBody = (lRes && lRes.body) || {};
+          lyricData = {
+            ok: true,
+            lrc: (lBody.lrc && lBody.lrc.lyric) || '',
+            tlyric: (lBody.tlyric && lBody.tlyric.lyric) || ''
+          };
+        }
+        if (lyricData && (lyricData.lrc || lyricData.tlyric)) {
+          const lName = `ncm_${songId}.lyric.json`;
+          fs.writeFileSync(ncmDownloadAudioPath(lName), JSON.stringify(lyricData), 'utf8');
+          lyricFileName = lName;
+        }
+      } catch (_) {}
+
+      const entry = {
+        songId,
+        title: String(body.title || '未知歌曲').slice(0, 160),
+        artist: String(body.artist || '未知艺术家').slice(0, 160),
+        album: String(body.album || '').slice(0, 160),
+        duration: Number(body.duration) || 0,
+        level: meta.level || level,
+        type: ext,
+        size,
+        file: audioFileName,
+        coverFile: coverFileName,
+        lyricFile: lyricFileName,
+        downloadedAt: Date.now()
+      };
+      ncmDownloads = [entry].concat(ncmDownloads.filter(x => x.songId !== songId));
+      ncmDownloadsById.set(songId, entry);
+      saveNcmDownloads();
+      return sendJson(res, 200, { ok: true, item: publicNcmDownloadItem(entry) });
+    }
+
+    if (p === '/api/ncm/downloads/delete' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const songId = String(body.songId || body.id || '').replace(/[^\d]/g, '');
+      const entry = ncmDownloadsById.get(songId);
+      if (!entry) return sendJson(res, 200, { ok: true, removed: false });
+      ncmDownloads = ncmDownloads.filter(x => x.songId !== songId);
+      ncmDownloadsById.delete(songId);
+      for (const fn of [entry.file, entry.coverFile, entry.lyricFile]) {
+        if (fn) {
+          try { fs.unlinkSync(ncmDownloadAudioPath(fn)); } catch (_) {}
+        }
+      }
+      saveNcmDownloads();
+      return sendJson(res, 200, { ok: true, removed: true });
+    }
+
+    if (p === '/api/ncm/downloads/file') {
+      const songId = String(u.searchParams.get('id') || '').replace(/[^\d]/g, '');
+      const entry = ncmDownloadsById.get(songId);
+      if (!entry || !entry.file) {
+        res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Not found');
+        return;
+      }
+      serveAudioCache(req, res, { file: ncmDownloadAudioPath(entry.file), type: entry.type || 'mp3' });
+      return;
+    }
+
+    if (p === '/api/ncm/downloads/cover') {
+      const songId = String(u.searchParams.get('id') || '').replace(/[^\d]/g, '');
+      const entry = ncmDownloadsById.get(songId);
+      const coverPath = entry && entry.coverFile ? ncmDownloadAudioPath(entry.coverFile) : '';
+      if (!coverPath || !fs.existsSync(coverPath)) {
+        res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Not found');
+        return;
+      }
+      res.writeHead(200, {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'image/jpeg',
+        'Cache-Control': 'public, max-age=86400'
+      });
+      fs.createReadStream(coverPath).pipe(res);
+      return;
+    }
+
+    if (p === '/api/ncm/downloads/lyric') {
+      const songId = String(u.searchParams.get('id') || '').replace(/[^\d]/g, '');
+      const entry = ncmDownloadsById.get(songId);
+      const lyricPath = entry && entry.lyricFile ? ncmDownloadAudioPath(entry.lyricFile) : '';
+      if (!lyricPath || !fs.existsSync(lyricPath)) {
+        return sendJson(res, 200, { ok: true, lrc: '', tlyric: '' });
+      }
+      try {
+        const data = JSON.parse(fs.readFileSync(lyricPath, 'utf8'));
+        return sendJson(res, 200, { ok: true, lrc: data.lrc || '', tlyric: data.tlyric || '' });
+      } catch (_) {
+        return sendJson(res, 200, { ok: true, lrc: '', tlyric: '' });
+      }
     }
 
     if (p === '/api/song/stream') {

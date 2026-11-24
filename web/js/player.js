@@ -4,8 +4,15 @@
   const DATA = window.NIENTUM_DATA || { chapters: [], tracks: [], wallpapers: [] };
   const STORAGE_KEY = 'nientum_wallpaper_v4';
   const BASE_WALLPAPERS = DATA.wallpapers.slice();
+  const BASE_TRACKS = DATA.tracks.slice();
+  const BASE_CHAPTERS = DATA.chapters.slice();
   let importedWallpapers = [];
   let wpRemoveArm = { id: '', time: 0 };
+  let ncmDownloadedItems = [];
+  let ncmDownloadedIds = new Set();
+  let ncmDownloadBusyIds = new Set();
+  let ncmDownloadsSynced = false;
+  let dlRemoveArm = { id: '', time: 0 };
 
   const state = {
     uiMode: 'capsule',       // capsule | pure | theater
@@ -849,6 +856,8 @@
     };
   }
 
+  let importedWpSynced = false;
+
   async function loadImportedWallpapers() {
     try {
       const ctrl = new AbortController();
@@ -858,8 +867,9 @@
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const data = await resp.json();
       importedWallpapers = (data && Array.isArray(data.items) ? data.items : []).map(importedToWallpaper);
+      importedWpSynced = true;
     } catch (_) {
-      importedWallpapers = [];
+      if (!importedWpSynced) importedWallpapers = [];
     }
     DATA.wallpapers = BASE_WALLPAPERS.concat(importedWallpapers);
     return importedWallpapers;
@@ -1705,6 +1715,9 @@
 
   // 封票+封面合成图路径（每章 idle / active 两张）
   function cardArt(track, active) {
+    if (track && track.isNcmDownload) {
+      return 'assets/cards/blank_' + (active ? 'active' : 'idle') + '.png';
+    }
     const m = /([^/\\]+)\.png$/i.exec(track && track.cover ? track.cover : '');
     const base = m ? m[1] : 'cover_act0';
     return 'assets/cards/' + base + (active ? '_active' : '_idle') + '.png';
@@ -1751,6 +1764,15 @@
     $('stat-idx').textContent = `曲目  ${String(selVisIdx + 1).padStart(2, '0')} / ${String(visibleRows.length).padStart(2, '0')}`;
     $('stat-total').textContent = `${DATA.tracks.length} 曲 · ${DATA.chapters.length} 章`;
 
+    if (!visibleRows.length) {
+      $('stat-idx').textContent = '曲目  00 / 00';
+      const emptyMsg = state.chapter === 'NCM_DL'
+        ? '暂无已下载歌曲。<br/>前往「网易云音乐」页面点击 ⬇ 即可保存到这里离线播放。'
+        : '当前分类暂无曲目';
+      list.innerHTML = `<div class="track-empty">${emptyMsg}</div>`;
+      return;
+    }
+
     const listH = list.clientHeight || 820;
     const totalH = Math.max(listH + 20, TOP_PAD + Math.max(0, visibleRows.length - 1) * ROW_STRIDE + listH * 0.55);
     const spacer = document.createElement('div');
@@ -1760,25 +1782,59 @@
     visibleRows.forEach(({ track, idx }, i) => {
       const isSelected = idx === selectedIndex;
       const isPlaying = activeSource === 'local' && state.playing && idx === state.trackIndex;
+      const isDl = !!track.isNcmDownload;
       const card = document.createElement('div');
       card.className =
         'track-card' +
         (isSelected ? ' selected' : '') +
         (isPlaying ? ' playing' : '') +
-        (track.original ? ' is-original' : '');
+        (track.original ? ' is-original' : '') +
+        (isDl ? ' is-ncm-dl' : '');
       // 距离选中项越近层级越高，严格还原鉴赏器卡片叠压先后关系
       card.style.zIndex = String(500 - Math.abs(i - selVisIdx));
-      const subText = (track.actZh && track.actZh !== track.actLabel) ? `${track.actLabel} · ${track.actZh}` : track.actLabel;
+      const subText = isDl
+        ? [track.album || '网易云下载', fmtTime(track.duration)].filter(Boolean).join(' · ')
+        : ((track.actZh && track.actZh !== track.actLabel) ? `${track.actLabel} · ${track.actZh}` : track.actLabel);
+      const armed = isDl && dlRemoveArm.id === track.songId && (Date.now() - dlRemoveArm.time) < 3000;
       card.innerHTML = `
         <img class="card-img" src="${cardArt(track, isSelected)}" alt="" draggable="false" />
+        ${isDl ? `<div class="ncm-cover"><img src="${escapeHtml(track.cover || 'assets/covers/cover_ending.png')}" loading="lazy" alt="" draggable="false" /></div><div class="ncm-thumb-mark"></div>` : ''}
         <div class="track-info">
           <div class="track-name">${escapeHtml(track.title)}</div>
           <div class="track-artist">${escapeHtml(track.artist)}</div>
-          <div class="track-sub">${escapeHtml(subText)} &nbsp;&nbsp;&nbsp; ${fmtTime(track.duration)}</div>
+          <div class="track-sub">${escapeHtml(subText)}${isDl ? '' : ' &nbsp;&nbsp;&nbsp; ' + fmtTime(track.duration)}</div>
         </div>
-        <div class="track-orig-badge"></div>
+        ${isDl ? `<button type="button" class="track-dl-del${armed ? ' armed' : ''}" title="${armed ? '再次点击确认从已下载移除' : '从已下载移除'}">${armed ? '确认移除' : '✕'}</button>` : '<div class="track-orig-badge"></div>'}
         <span class="track-badge"><span class="eq-bars"><i></i><i></i><i></i></span>正在播放</span>
       `;
+      if (isDl) {
+        const delBtn = card.querySelector('.track-dl-del');
+        if (delBtn) {
+          delBtn.onclick = (e) => {
+            e.stopPropagation();
+            const now = Date.now();
+            if (dlRemoveArm.id === track.songId && (now - dlRemoveArm.time) < 3000) {
+              dlRemoveArm = { id: '', time: 0 };
+              deleteNcmDownload(track.songId);
+              return;
+            }
+            dlRemoveArm = { id: track.songId, time: now };
+            delBtn.classList.add('armed');
+            delBtn.textContent = '确认移除';
+            delBtn.title = '再次点击确认从已下载移除';
+            setTimeout(() => {
+              if (dlRemoveArm.id === track.songId && (Date.now() - dlRemoveArm.time) >= 2900) {
+                dlRemoveArm = { id: '', time: 0 };
+                if (delBtn.isConnected) {
+                  delBtn.classList.remove('armed');
+                  delBtn.textContent = '✕';
+                  delBtn.title = '从已下载移除';
+                }
+              }
+            }, 3000);
+          };
+        }
+      }
       const triggerPlayCard = () => {
         const now = performance.now();
         if (now - lastDblPlayAt < 260) return;
@@ -2162,8 +2218,10 @@
 
   function playTrackAt(idx, autoplay, syncFocus) {
     if (!DATA.tracks.length) return;
-    // 发布包可设置 window.NIENTUM_NO_LOCAL_MUSIC=true（不含 88 首本地歌曲时）
-    if (window.NIENTUM_NO_LOCAL_MUSIC) {
+    idx = (idx + DATA.tracks.length) % DATA.tracks.length;
+    const targetTrack = DATA.tracks[idx];
+    // 发布包可设置 window.NIENTUM_NO_LOCAL_MUSIC=true（不含 88 首本地歌曲时，已下载的网易云歌曲仍允许播放）
+    if (window.NIENTUM_NO_LOCAL_MUSIC && !(targetTrack && targetTrack.isNcmDownload)) {
       state.playing = false;
       audioError = '本地曲库未随包提供，请使用网易云在线播放';
       updateTrackUi();
@@ -2176,10 +2234,17 @@
       saveState();
     }
     updateDesktopLyric(0);
-    idx = (idx + DATA.tracks.length) % DATA.tracks.length;
     state.trackIndex = idx;
     if (syncFocus) selectedIndex = idx;
     const tr = DATA.tracks[idx];
+    if (tr && tr.isNcmDownload) {
+      loadLocalDownloadedLyric(tr);
+    } else {
+      ncmLyricSongId = '';
+      ncmLyricLines = [];
+      ncmLyricActiveIdx = -2;
+      updateDesktopLyric(0);
+    }
     syncWallpaperToAct(tr.act);
     updateTrackUi();
 
@@ -2378,7 +2443,9 @@
     }
     const box = lyricBoxEl, mainEl = lyricMainEl, subEl = lyricSubEl;
     if (!box || !mainEl || !subEl) return;
-    if (activeSource !== 'ncm' || state.ncmLyricEnabled === false || !ncmLyricLines.length) {
+    const curLocal = activeSource === 'local' ? DATA.tracks[state.trackIndex] : null;
+    const allowLyric = activeSource === 'ncm' || !!(curLocal && curLocal.isNcmDownload);
+    if (!allowLyric || state.ncmLyricEnabled === false || !ncmLyricLines.length) {
       if (ncmLyricActiveIdx !== -2) {
         ncmLyricActiveIdx = -2;
         box.classList.remove('show');
@@ -4065,7 +4132,7 @@
 
       let latestReleaseUrl = 'https://github.com/Chengxhen/nientum-wallpaper/releases';
       // 更新键：网页端版本号，随增量包一起更新；与 Release tag 比较
-      const WEB_APP_VERSION = 'v2026.11.23.8';
+      const WEB_APP_VERSION = 'v2026.11.24.1';
       const verParts = (v) => String(v || '').replace(/^v/i, '').split(/[.\-+]/).map(x => parseInt(x, 10) || 0);
       const cmpVer = (a, b) => {
         const A = verParts(a), B = verParts(b);
@@ -4915,18 +4982,35 @@
     playScopeChapter = state.chapter;
 
     setUiMode(state.uiMode);
-    selectWallpaperById(state.wallpaperId);
-    loadImportedWallpapers().then(() => {
-      const cur = DATA.wallpapers.find(w => w.id === state.wallpaperId);
-      if (!cur || cur.unsupported) {
-        const first = DATA.wallpapers.find(w => !w.unsupported);
-        if (first) selectWallpaperById(first.id);
-      } else if (String(state.wallpaperId).startsWith('imp_')) {
-        selectWallpaperById(state.wallpaperId);
-      }
-      renderWallpaperCats();
-      renderWallpaperGrid();
-    });
+    const bootTargetWpId = state.wallpaperId;
+    selectWallpaperById(bootTargetWpId);
+    const syncBootImportedWallpapers = (attempt) => {
+      loadImportedWallpapers().then(() => {
+        if (!importedWpSynced && attempt < 18) {
+          setTimeout(() => syncBootImportedWallpapers(attempt + 1), 1600);
+          return;
+        }
+        const desiredId = String(bootTargetWpId || '').startsWith('imp_') ? bootTargetWpId : state.wallpaperId;
+        const cur = DATA.wallpapers.find(w => w.id === desiredId);
+        if (!cur || cur.unsupported) {
+          const first = DATA.wallpapers.find(w => !w.unsupported);
+          if (first) selectWallpaperById(first.id);
+        } else if (String(desiredId).startsWith('imp_') || state.wallpaperId !== desiredId) {
+          selectWallpaperById(desiredId);
+        }
+        renderWallpaperCats();
+        renderWallpaperGrid();
+      });
+    };
+    syncBootImportedWallpapers(0);
+    const syncBootNcmDownloads = (attempt) => {
+      loadNcmDownloads().then(() => {
+        if (!ncmDownloadsSynced && attempt < 18) {
+          setTimeout(() => syncBootNcmDownloads(attempt + 1), 1500);
+        }
+      });
+    };
+    syncBootNcmDownloads(0);
     renderChapters();
     renderTrackList();
     // 预加载封票合成图（每章 idle/active 各一张），避免切换选中时闪烁
@@ -5008,6 +5092,7 @@
       capLike.textContent = glyph;
       capLike.title = title;
     }
+    updateNcmDownloadUi();
   }
 
   async function loadNcmLiked(force) {
@@ -5062,6 +5147,154 @@
       ncmLikeBusy = false;
       updateNcmLikeUi();
     }
+  }
+
+  function updateNcmDownloadUi() {
+    const btn = $('btn-ncm-download');
+    if (!btn) return;
+    const id = currentNcmSongId();
+    const show = activeSource === 'ncm' && !!id;
+    const busy = !!id && ncmDownloadBusyIds.has(id);
+    const downloaded = !!id && ncmDownloadedIds.has(id);
+    btn.style.display = show ? 'grid' : 'none';
+    btn.classList.toggle('downloaded', downloaded);
+    btn.classList.toggle('busy', busy);
+    btn.textContent = busy ? '…' : (downloaded ? '✓' : '⬇');
+    btn.title = busy ? '正在下载…' : (downloaded ? '已下载到自由选曲「下载」分类' : '下载到自由选曲「下载」分类');
+  }
+
+  function syncNcmDownloadsIntoLibrary(items) {
+    const playingTrack = (activeSource === 'local' && DATA.tracks[state.trackIndex]) ? DATA.tracks[state.trackIndex] : null;
+    const selectedTrack = DATA.tracks[selectedIndex] || null;
+    ncmDownloadedItems = Array.isArray(items) ? items : [];
+    ncmDownloadedIds = new Set(ncmDownloadedItems.map(x => String(x.songId)));
+    const mapped = ncmDownloadedItems.map(item => ({
+      id: item.id || ('ncm_dl_' + item.songId),
+      songId: String(item.songId),
+      title: item.title || '未知歌曲',
+      artist: item.artist || '未知艺术家',
+      album: item.album || '',
+      act: 'NCM_DL',
+      actLabel: '下载',
+      actZh: '网易云下载',
+      duration: Number(item.duration) || 0,
+      cover: item.cover || 'assets/covers/cover_ending.png',
+      src: item.src,
+      lyricUrl: item.lyricUrl || '',
+      isNcmDownload: true
+    }));
+    DATA.tracks = BASE_TRACKS.concat(mapped);
+    DATA.chapters = BASE_CHAPTERS.concat([{ code: 'NCM_DL', label: '下载', zh: '网易云下载' }]);
+
+    if (playingTrack) {
+      const nextPlayIdx = DATA.tracks.findIndex(t => t.id === playingTrack.id);
+      state.trackIndex = nextPlayIdx >= 0 ? nextPlayIdx : Math.min(state.trackIndex, Math.max(0, DATA.tracks.length - 1));
+    }
+    if (selectedTrack) {
+      const nextSelIdx = DATA.tracks.findIndex(t => t.id === selectedTrack.id);
+      if (nextSelIdx >= 0) selectedIndex = nextSelIdx;
+      else selectedIndex = Math.min(selectedIndex, Math.max(0, DATA.tracks.length - 1));
+    }
+    renderChapters();
+    renderTrackList();
+    updateNcmDownloadUi();
+    updateNeteasePlayingRows();
+  }
+
+  async function loadNcmDownloads() {
+    try {
+      const res = await ncmApi('/api/ncm/downloads');
+      if (res && res.ok && Array.isArray(res.items)) {
+        ncmDownloadsSynced = true;
+        syncNcmDownloadsIntoLibrary(res.items);
+      }
+    } catch (_) {}
+  }
+
+  async function loadLocalDownloadedLyric(tr) {
+    const id = tr && tr.id ? String(tr.id) : '';
+    ncmLyricSongId = id;
+    ncmLyricLines = [];
+    ncmLyricActiveIdx = -2;
+    updateDesktopLyric(0);
+    if (!tr || !tr.lyricUrl) return;
+    try {
+      const resp = await fetch(tr.lyricUrl, { cache: 'no-store' });
+      const res = await resp.json();
+      if (ncmLyricSongId !== id) return;
+      const orig = parseLrc(res && res.lrc);
+      const trans = parseLrc(res && res.tlyric);
+      if (orig.length && trans.length) {
+        let j = 0;
+        for (const line of orig) {
+          while (j + 1 < trans.length && trans[j + 1].time <= line.time + 0.4) j++;
+          if (trans[j] && Math.abs(trans[j].time - line.time) <= 0.45) {
+            line.sub = trans[j].text;
+          }
+        }
+      }
+      ncmLyricLines = orig;
+      ncmLyricActiveIdx = -2;
+      updateDesktopLyric(audio ? (audio.currentTime || 0) : 0);
+    } catch (_) {}
+  }
+
+  async function downloadNcmTrack(tr) {
+    if (!tr || !tr.id) return;
+    const sid = String(tr.id);
+    if (ncmDownloadBusyIds.has(sid)) return;
+    if (ncmDownloadedIds.has(sid)) {
+      flashNcmLikeStatus('已在自由选曲「下载」分类中');
+      return;
+    }
+    ncmDownloadBusyIds.add(sid);
+    updateNcmDownloadUi();
+    updateNeteasePlayingRows();
+    flashNcmLikeStatus('正在下载到本地…');
+    try {
+      const resp = await fetch(`${NCM_BASE}/api/ncm/downloads/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          songId: sid,
+          title: tr.title || '',
+          artist: tr.artist || '',
+          album: tr.album || '',
+          duration: tr.duration || 0,
+          cover: tr.cover || '',
+          level: state.ncmLevel || 'exhigh'
+        })
+      });
+      const data = await resp.json();
+      if (data && data.ok) {
+        flashNcmLikeStatus(data.alreadyExisted ? '已在「下载」分类中' : '已下载到自由选曲「下载」分类');
+        await loadNcmDownloads();
+      } else {
+        flashNcmLikeStatus((data && data.error) || '下载失败');
+      }
+    } catch (_) {
+      flashNcmLikeStatus('下载失败：本地代理未连接');
+    } finally {
+      ncmDownloadBusyIds.delete(sid);
+      updateNcmDownloadUi();
+      updateNeteasePlayingRows();
+    }
+  }
+
+  async function deleteNcmDownload(songId) {
+    const sid = String(songId || '');
+    if (!sid) return;
+    try {
+      const resp = await fetch(`${NCM_BASE}/api/ncm/downloads/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ songId: sid })
+      });
+      const data = await resp.json();
+      if (data && data.ok) {
+        await loadNcmDownloads();
+      }
+    } catch (_) {}
   }
 
   // 网易云卡纸用自由选曲同款成品封票底图（画框内为空白纸面，不放章节 CG）
@@ -5174,6 +5407,16 @@
         const want = ncmPaperSrc(selected);
         if (frame.getAttribute('src') !== want) frame.setAttribute('src', want);
       }
+      const dlBtn = card.querySelector('.ncm-card-dl-btn');
+      if (dlBtn) {
+        const sid = String(id || '');
+        const busy = !!(sid && ncmDownloadBusyIds.has(sid));
+        const downloaded = !!(sid && ncmDownloadedIds.has(sid));
+        dlBtn.classList.toggle('busy', busy);
+        dlBtn.classList.toggle('downloaded', downloaded);
+        dlBtn.textContent = busy ? '下载中…' : (downloaded ? '✓ 已下载' : '⬇ 下载');
+        dlBtn.title = busy ? '正在下载…' : (downloaded ? '已下载到自由选曲「下载」分类' : '下载到自由选曲「下载」分类');
+      }
     });
     scheduleNcmArc();
   }
@@ -5242,9 +5485,17 @@
             <div class="track-sub">${escapeHtml(sub)}</div>
           </div>
           <span class="track-badge"><span class="eq-bars"><i></i><i></i><i></i></span>正在播放</span>
+          <button type="button" class="ncm-card-dl-btn${ncmDownloadBusyIds.has(String(tr.id)) ? ' busy' : (ncmDownloadedIds.has(String(tr.id)) ? ' downloaded' : '')}" title="${ncmDownloadedIds.has(String(tr.id)) ? '已下载到自由选曲「下载」分类' : '下载到自由选曲「下载」分类'}">${ncmDownloadBusyIds.has(String(tr.id)) ? '下载中…' : (ncmDownloadedIds.has(String(tr.id)) ? '✓ 已下载' : '⬇ 下载')}</button>
         </div>
       `;
       const card = item.firstElementChild;
+      const dlBtn = card.querySelector('.ncm-card-dl-btn');
+      if (dlBtn) {
+        dlBtn.onclick = (e) => {
+          e.stopPropagation();
+          downloadNcmTrack(tr);
+        };
+      }
       const triggerPlay = () => {
         ncmSelectedTrackId = tr.id;
         playNeteaseAt(i, ncmViewTracks);
@@ -5571,6 +5822,7 @@
     if ($('btn-ncm-loop')) $('btn-ncm-loop').onclick = cycleNcmLoopMode;
     if ($('btn-ncm-like')) $('btn-ncm-like').onclick = toggleNcmLike;
     if ($('btn-cap-like')) $('btn-cap-like').onclick = toggleNcmLike;
+    if ($('btn-ncm-download')) $('btn-ncm-download').onclick = () => downloadNcmTrack(getCurrentTrack());
     if ($('ncm-vinyl-stage')) $('ncm-vinyl-stage').onclick = playSelectedNetease;
     if ($('chk-ncm-cover-card')) {
       $('chk-ncm-cover-card').checked = !!state.ncmCoverToCard;
